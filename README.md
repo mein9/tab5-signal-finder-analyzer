@@ -130,12 +130,18 @@ address and reading in them is made up.
 
 - M5Stack Tab5. Built and tested on a unit with ESP32-P4 chip revision v1.3
   and the ST7121 display panel.
-- The ESP32-C6 radio chip must run ESP-Hosted **3.0.6 with Bluetooth enabled**.
-  Some firmware (for example a Wi-Fi-only build) leaves Bluetooth off. If the
-  app finds that, it offers to install a Wi-Fi + Bluetooth build of the same
-  version over the internal link. That build is included as
-  `main/c6_radio_fw.bin`; it is Espressif's ESP-Hosted co-processor example
-  (`bleprph_wifi_coex/cp`, Apache-2.0) built for the Tab5's C6.
+- The ESP32-C6 radio chip must run ESP-Hosted firmware **with Bluetooth
+  enabled**. Tested with 2.12.13 and 3.0.6. Some firmware (for example a
+  Wi-Fi-only build) leaves Bluetooth off. If the app finds that, it offers to
+  install a Wi-Fi + Bluetooth build over the internal link. That build is
+  included as `main/c6_radio_fw.bin`; it is Espressif's ESP-Hosted 2.12.13
+  `slave` example (Apache-2.0) built for the ESP32-C6 with its default
+  settings.
+- Why 2.12.13 and not 3.x: apps built on ESP-Hosted 2.x, such as the
+  M5Launcher, cannot talk to 3.x firmware on the radio chip (their Wi-Fi stops
+  working), while this app works with both. The USB serial command `radiofw`
+  sends the bundled firmware to the radio chip at any time, for example after
+  another app has moved it to 3.x.
 - Optional: the M5Stack **Tab5 Keyboard** (I2C address 0x6D on G0 / G1). It is
   found automatically, also when attached while the app is running.
 - For the Phone section: an RTL-SDR dongle in the Tab5's USB-A port. Tested

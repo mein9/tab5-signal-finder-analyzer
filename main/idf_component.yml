@@ -1,7 +1,7 @@
 dependencies:
   idf:
     version: ">=5.5"
-  # Must match the ESP-Hosted firmware already on this Tab5's C6 (3.0.6).
+  # A 3.x host also works with 1.x / 2.x firmware on the C6 (the bundled one is 2.12.13).
   espressif/esp_hosted:
     version: "==3.0.6"
   # 0.3.0+ knows the Tab5's newer ST7121 display panel.

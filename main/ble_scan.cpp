@@ -183,6 +183,14 @@ static void update_task(void *) {
     esp_restart();
 }
 
+void radio_update_force() {
+    if (s_upd == RadioUpdate::Running || s_state == BleState::Starting || s_state == BleState::Linking ||
+        s_state == BleState::LinkFailed) return;
+    s_upd = RadioUpdate::Running;
+    s_upd_pct = 0;
+    xTaskCreatePinnedToCore(update_task, "radio_upd", 8192, nullptr, 5, nullptr, 1);
+}
+
 void radio_update_start() {
     if (s_upd == RadioUpdate::Running || s_state != BleState::ControllerFailed) return;
     s_upd = RadioUpdate::Running;

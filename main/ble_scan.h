@@ -26,6 +26,7 @@ void ble_demo_set_scanning();
 
 // Radio-chip firmware update (adds Bluetooth to a Wi-Fi-only C6 build).
 enum class RadioUpdate : uint8_t { Idle, Running, Done, Failed };
+void        radio_update_force();      // same, whenever the link to the radio chip is up
 void        radio_update_start();      // only valid when state is ControllerFailed
 RadioUpdate radio_update_state();
 int         radio_update_percent();

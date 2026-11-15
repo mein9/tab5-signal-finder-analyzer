@@ -650,7 +650,7 @@ void radio_update_panel() {
                            &fonts::FreeSansBold18pt7b, WARN, 44);
         yy = text_wrap("The Tab5's ESP32-C6 radio chip is running a Wi-Fi-only firmware, so it can't scan "
                        "for Bluetooth devices.", tx, yy + 20, w - 80, &fonts::FreeSans12pt7b, TEXT, 34);
-        text_wrap("This app can install the same ESP-Hosted version (3.0.6) with Wi-Fi AND Bluetooth. It takes "
+        text_wrap("This app can install ESP-Hosted 2.12.13 with Wi-Fi AND Bluetooth, which the M5Launcher can use too. It takes "
                   "about a minute. The new firmware is written to a spare slot and only used once it arrives "
                   "complete; if the transfer fails, the radio chip keeps its current firmware. Don't turn the "
                   "Tab5 off while it runs. Other apps may switch it back to their own version later.",
@@ -2201,6 +2201,9 @@ void ui_loop_once() {
         break;
     case UsbCommand::CopyAppToSd:
         if (s_copy == 0) s_copy = 1;
+        break;
+    case UsbCommand::RadioFirmware:
+        radio_update_force();
         break;
     case UsbCommand::RemoveOldCopies: {
         size_t n = app_remove_old_copies();

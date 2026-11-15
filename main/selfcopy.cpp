@@ -47,6 +47,8 @@ void command_task(void *) {
             if (strcmp(line, "sdcopy") == 0) {
                 s_command = UsbCommand::CopyAppToSd;
                 ESP_LOGI(TAG, "USB command: copy the app to the SD card");
+            } else if (strcmp(line, "radiofw") == 0) {
+                s_command = UsbCommand::RadioFirmware;
             } else if (strcmp(line, "sdclean") == 0) {
                 s_command = UsbCommand::RemoveOldCopies;
                 ESP_LOGI(TAG, "USB command: delete older copies from the SD card");

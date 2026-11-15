@@ -22,6 +22,7 @@ size_t app_remove_old_copies();
 // without anyone touching the screen (for updating the SD card, and for
 // testing). Send a line of text:
 //   sdcopy     copy the app to the SD card
+//   radiofw    send the bundled Wi-Fi + Bluetooth firmware to the radio chip again
 //   sdclean    delete older copies of the app from the SD card
 //   tap X Y    act as if the screen was tapped at X, Y
 //   key N      act as if a key was pressed on the Tab5 Keyboard (N: character code,
@@ -31,5 +32,5 @@ size_t app_remove_old_copies();
 //              "SHOT name w h" and "ENDSHOT")
 // Requests are picked up by the UI task through usb_command_take().
 void usb_commands_start();
-enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Flick, Key, Screenshot };
+enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Flick, Key, Screenshot, RadioFirmware };
 UsbCommand usb_command_take(int *x, int *y);
