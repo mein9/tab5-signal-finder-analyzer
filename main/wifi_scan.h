@@ -9,6 +9,7 @@ enum class WifiState : uint8_t { Off, Starting, Scanning, Failed };
 // wifi_set_wanted(true) - so Bluetooth gets the radio to itself otherwise.
 void wifi_start();
 void wifi_set_wanted(bool wanted);
+void wifi_demo_set_scanning();      // demo mode only
 
 WifiState   wifi_state();
 int         wifi_error();

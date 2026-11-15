@@ -6,45 +6,65 @@ toward it: the signal number, meter, beeps and colour all get stronger as you
 get closer. Made for finding things like a dropped earbud, a tracker tag, or a
 hidden access point.
 
+| | |
+| --- | --- |
+| ![Device list](docs/screenshots/list.png) | ![Hot / cold finder](docs/screenshots/finder.png) |
+| ![Wi-Fi networks](docs/screenshots/wifi.png) | ![Phone bands](docs/screenshots/phone-bands.png) |
+
+More screenshots are in [docs/screenshots](docs/screenshots). They were taken in
+demo mode, so every device name, network name and address in them is made up.
+
 ## What it does
 
 **Finding**
 
-- **Device list** â€“ Bluetooth LE devices nearby, strongest first. Recognises
+- **Device list** - Bluetooth LE devices nearby, strongest first. Recognises
   AirPods and Beats (with model), Find My items (AirTags etc.), Tile, Galaxy
   SmartTag, Google Fast Pair earbuds, and Apple, Samsung and Windows devices.
-- **Wi-Fi section** â€“ 2.4 GHz networks, found the same way. While you track
+- **Wi-Fi section** - 2.4 GHz networks, found the same way. While you track
   one, the scanner stays on its channel for faster updates.
-- **Hot / cold screen** â€“ big signal reading, warmer / colder trend, meter,
+- **Hot / cold screen** - big signal reading, warmer / colder trend, meter,
   30-second graph, and Geiger-style beeps that speed up as you close in.
-- **Sweep radar** â€“ turn in a circle holding the Tab5; the motion sensor maps
+- **Sweep radar** - turn in a circle holding the Tab5; the motion sensor maps
   signal strength to direction and points at the strongest.
-- **Colour view** â€“ the whole screen goes from blue (far) to red (close), with
+- **Colour view** - the whole screen goes from blue (far) to red (close), with
   no sound, for quiet places.
+
+**Phone bands (optional, needs an RTL-SDR dongle)**
+
+- **Phone section** - with an RTL-SDR plugged into the Tab5's USB-A port, shows
+  how strongly phones are transmitting on each US mobile band (600, 700, 850
+  and 1700 MHz; 1900 MHz is outside an RTL-SDR's range).
+- **Follow a band** - tap one for the same hot / cold screen, measured as dB
+  above that band's quiet level.
+- It measures signal strength only. Nothing is demodulated or decoded, so it
+  cannot tell whose phone it is or what is being sent. Phones transmit in
+  bursts; a call or a speed test on the phone you are looking for makes it
+  much easier to find.
 
 **Keeping track**
 
-- **Pin and rename** â€“ pin a device to the top of the list and give it your own
+- **Pin and rename** - pin a device to the top of the list and give it your own
   name.
-- **Left-behind alarm** â€“ alarms if a chosen device hasn't been heard for a
+- **Left-behind alarm** - alarms if a chosen device hasn't been heard for a
   minute.
-- **Tracker alert** â€“ warns if an AirTag (separated from its owner), Tile or
+- **Tracker alert** - warns if an AirTag (separated from its owner), Tile or
   SmartTag stays near you for 10+ minutes while the Tab5 is being carried.
-- **New-device watch** â€“ mark the surroundings as normal, then get an alert
+- **New-device watch** - mark the surroundings as normal, then get an alert
   when a new Bluetooth device shows up.
-- **Alert history** – past alerts since power-on, newest first.
-- **Pocket mode** – locks the touch screen (hold a circle for two seconds to
+- **Alert history** - past alerts since power-on, newest first.
+- **Pocket mode** - locks the touch screen (hold a circle for two seconds to
   unlock) while scanning, alerts and alarms keep running.
 
 **Tools**
 
-- **Wi-Fi channel chart** â€“ networks per channel, and the least crowded of
+- **Wi-Fi channel chart** - networks per channel, and the least crowded of
   channels 1, 6 and 11.
-- **Log to SD card** â€“ writes what it hears to `FINDLOG/LOGnnnnn.CSV` every
+- **Log to SD card** - writes what it hears to `FINDLOG/LOGnnnnn.CSV` every
   10 seconds.
-- **Clock** – set the date and time once; the Tab5's clock chip keeps it and it
+- **Clock** - set the date and time once; the Tab5's clock chip keeps it and it
   stamps the SD log and alerts.
-- **Battery saver** – dims the screen and slows redraws after a minute without
+- **Battery saver** - dims the screen and slows redraws after a minute without
   a touch.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
@@ -53,7 +73,7 @@ hidden access point.
 
 - Signal strength is a rough guide, not a distance. Walls, bodies and
   reflections move it around; trust the trend over a few seconds.
-- Find My items never broadcast their name â€“ only an anonymous, changing key â€“
+- Find My items never broadcast their name - only an anonymous, changing key -
   so they show as "Find My item". Nothing nearby can read the name.
 - Phones, AirPods and Find My items near their owner change address every few
   minutes. AirPods are followed by model instead; a nickname on other rotating
@@ -63,6 +83,9 @@ hidden access point.
   smooth travel (a car on a motorway) may not count as movement.
 - The app only listens. It never connects to, pairs with, or sends anything to
   the devices it lists. The SD log stays on the card.
+- The phone-band readings are relative, not calibrated power. Other
+  transmitters share some of these frequencies, and a full sweep of all bands
+  takes about ten seconds.
 
 ## Hardware
 
@@ -106,6 +129,29 @@ otherwise).
 Dependencies are fetched by the IDF component manager: `esp_hosted` 3.0.6,
 `esp_wifi_remote`, `M5Unified` and `M5GFX`.
 
+### Phone bands: the optional RTL-SDR driver
+
+The Phone section uses [esp-rtl-sdr](https://github.com/hardcoreerik/esp-rtl-sdr),
+a USB host driver for RTL-SDR dongles on the ESP32-P4. It is licensed
+**AGPL-3.0-only** and is deliberately not part of this repository. To build it
+in, put it in `components/esp_rtl_sdr` before building:
+
+```
+git clone https://github.com/hardcoreerik/esp-rtl-sdr.git components/esp_rtl_sdr
+```
+
+Developed against commit `bf99e997` (driver 0.9.6), with an RTL-SDR Blog V4.
+The driver also lists the Blog V3 and V4 Lite, Nooelec SMArt v5 and E4000
+dongles as supported. Without that folder the app builds and runs normally and
+the Phone section says the driver isn't included. If you add or remove the
+folder after a first build, run `idf.py reconfigure` so the build notices.
+
+### Demo mode
+
+`idf.py -DFINDER_DEMO=1 build` makes a build that shows made-up devices,
+networks and phone-band activity instead of scanning. The screenshots here
+were taken with it. Build again with `-DFINDER_DEMO=0` to go back.
+
 ## How the screen stays fast
 
 The Tab5's panel is natively portrait and its frame buffer is in external RAM.
@@ -127,4 +173,20 @@ gives about 17 frames a second.
 | `main/alerts.cpp` | Tracker, new-device and left-behind alerts |
 | `main/sdlog.cpp` | SD card log |
 | `main/clock.cpp` | Date and time |
+| `main/sdr.cpp` | Phone-band meter (RTL-SDR) |
+| `main/demo.cpp` | Demo mode |
 | `main/ui.cpp` | All screens |
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE).
+
+Two things it works with have their own licenses:
+
+- `main/c6_radio_fw.bin` is a build of Espressif's ESP-Hosted co-processor
+  firmware (Apache-2.0).
+- The optional `esp_rtl_sdr` driver is AGPL-3.0-only. A firmware image built
+  with it is a combined work, so if you share such an image you must do so
+  under the AGPL's terms, including making the complete source available. The
+  release binaries here are built with the driver; their complete source is
+  this repository plus the driver at the commit named above.

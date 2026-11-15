@@ -220,10 +220,13 @@ void ble_set_scanning(bool on) {
     if (on == s_scan_wanted) return;
     s_scan_wanted = on;
     if (!on && s_state == BleState::Scanning) {
-        ble_gap_disc_cancel();
+        if (!FINDER_DEMO) ble_gap_disc_cancel();
         s_state = BleState::Paused;
         ESP_LOGI(TAG, "scanning paused");
     } else if (on && s_state == BleState::Paused) {
-        start_scan();
+        if (FINDER_DEMO) s_state = BleState::Scanning;
+        else start_scan();
     }
 }
+
+void ble_demo_set_scanning() { s_state = BleState::Scanning; }

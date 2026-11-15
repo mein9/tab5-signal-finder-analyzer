@@ -13,5 +13,6 @@ if (-not $env:IDF_COMPONENT_CACHE_PATH) { $env:IDF_COMPONENT_CACHE_PATH = 'C:\es
 . "$env:IDF_PATH\export.ps1" | Out-Null
 Set-Location $PSScriptRoot
 if (-not (Test-Path sdkconfig)) { idf.py set-target esp32p4 }
-idf.py build
+# Extra arguments go to idf.py, for example: build.ps1 -DFINDER_DEMO=1
+idf.py @args build
 exit $LASTEXITCODE

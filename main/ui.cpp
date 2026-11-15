@@ -23,6 +23,7 @@
 #include "devices.h"
 #include "saved.h"
 #include "sdlog.h"
+#include "sdr.h"
 #include "wifi_scan.h"
 
 namespace {
@@ -46,10 +47,12 @@ int  Y0 = 0;               // extra header height in portrait; screens start thi
 bool s_rotate_pending = false;
 uint8_t s_canvas_rot = 3;  // rotation the canvas is currently laid out for
 
-enum class Screen { List, Finder, Sweep, Glow, Rename, Tools, Channels, Clock, History, Locked };
+enum class Screen { List, Finder, Sweep, Glow, Rename, Tools, Channels, Clock, History, Locked, Phone };
 Screen   s_screen = Screen::List;
 Filter   s_filter = Filter::Findable;
 bool     s_wifi_section = false;
+bool     s_phone_section = false;        // list shows phone bands (RTL-SDR)
+int      s_phone_band = 0;               // band open on the phone finder screen
 int      s_page = 0;
 uint8_t  s_volume = 55;                 // percent, 0 = off
 bool     s_vol_open = false;            // volume drop-down showing
@@ -522,8 +525,157 @@ void radio_update_panel() {
         text("Restarting the app to start Bluetooth...", tx, by + 90, &fonts::FreeSans12pt7b, MUTED);
 }
 
+// ---------------------------------------------------------------- phone bands
+// How far a band is above its own quiet level, and what that suggests.
+float phone_activity(const SdrBand &b) { return b.valid ? std::max(0.0f, b.level_db - b.floor_db) : 0.0f; }
+
+uint32_t activity_color(float db) {
+    float t = std::clamp(db / 35.0f, 0.0f, 1.0f);
+    return t < 0.5f ? blend(MUTED, WARN, t * 2) : blend(WARN, GOOD, (t - 0.5f) * 2);
+}
+
+const char *activity_text(float db) {
+    if (db >= 30) return "Very strong - a phone is transmitting right here";
+    if (db >= 18) return "Strong - a phone is transmitting close by";
+    if (db >= 8)  return "Some activity - a phone is transmitting nearby";
+    return "Quiet - nothing transmitting nearby right now";
+}
+
+// The Phone section of the list: one row per cellular band.
+void phone_list(int sx, int sy) {
+    SdrState st = sdr_state();
+    uint32_t sc = st == SdrState::Running ? MUTED : st == SdrState::Failed ? BAD : WARN;
+    canvas.setClipRect(sx, sy - 24, W - sx - 16, 48);
+    text(s_scan_on ? sdr_status_text() : "Scanning is off", sx, sy, &fonts::FreeSans12pt7b, sc, middle_left);
+    canvas.clearClipRect();
+
+    const int top = 164 + Y0 + (P ? 64 : 0), row_h = 80;
+    if (st != SdrState::Running) {
+        int y = text_wrap("This section measures how strongly phones are transmitting on each mobile band, "
+                          "using an RTL-SDR dongle plugged into the Tab5's USB-A port.",
+                          48, top + 40, W - 96, &fonts::FreeSans12pt7b, TEXT, 34);
+        text_wrap("It shows strength only. Nothing is decoded, so it can't tell whose phone it is.",
+                  48, y + 16, W - 96, &fonts::FreeSans12pt7b, MUTED, 34);
+        return;
+    }
+
+    for (size_t i = 0; i < sdr_band_count(); ++i) {
+        SdrBand b = sdr_band(i);
+        Rect r{24, top + (int)i * row_h, W - 48, row_h - 8};
+        if (r.y + r.h > H - 60) break;
+        canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
+        float act = phone_activity(b);
+        text(b.name, r.x + 24, r.y + 10, &fonts::FreeSansBold12pt7b, b.in_range ? TEXT : MUTED);
+        char det[96];
+        if (!b.in_range) snprintf(det, sizeof det, "%s  |  outside this dongle's range", b.detail);
+        else if (!b.valid) snprintf(det, sizeof det, "%s  |  measuring...", b.detail);
+        else snprintf(det, sizeof det, "%s  |  strongest near %.0f MHz", b.detail, b.peak_hz / 1e6f);
+        canvas.setClipRect(r.x, r.y, r.w - (P ? 150 : 520), r.h);
+        text(det, r.x + 24, r.y + 42, &fonts::FreeSans9pt7b, MUTED);
+        canvas.clearClipRect();
+        if (b.in_range && b.valid) {
+            if (!P) {       // activity bar
+                int bx = r.x + r.w - 500, bwid = 330;
+                canvas.fillRoundRect(bx, r.y + 26, bwid, 20, 10, BG);
+                int fw = (int)(bwid * std::clamp(act / 40.0f, 0.0f, 1.0f));
+                if (fw > 10) canvas.fillRoundRect(bx, r.y + 26, fw, 20, 10, activity_color(act));
+            }
+            char v[24];
+            snprintf(v, sizeof v, "+%.0f dB", act);
+            text(v, r.x + r.w - 24, r.y + 12, &fonts::FreeSansBold12pt7b, activity_color(act), top_right);
+            text(act >= 8 ? "active" : "quiet", r.x + r.w - 24, r.y + 44, &fonts::FreeSans9pt7b, MUTED, top_right);
+        }
+        if (b.in_range && tapped(r)) {
+            s_phone_band = (int)i;
+            s_screen = Screen::Phone;
+            s_next_beep = 0;
+            s_tap = false;
+            break;
+        }
+    }
+    text(P ? "tap a band to follow it" : "dB above each band's quiet level  |  tap a band to follow it",
+         W / 2, H - 42, &fonts::FreeSans12pt7b, MUTED, middle_center);
+}
+
+// Hot/cold screen for one phone band.
+void screen_phone() {
+    draw_header("Signal Finder & Analyzer");
+    SdrBand b = sdr_band((size_t)s_phone_band);
+    Rect back{24, 92 + Y0, 150, 56};
+    button(back, "< Back");
+    if (tapped(back)) { s_screen = Screen::List; s_tap = false; }
+    char sub[112];
+    if (b.valid) snprintf(sub, sizeof sub, "%s  |  strongest near %.0f MHz", b.detail, b.peak_hz / 1e6f);
+    else snprintf(sub, sizeof sub, "%s", b.detail);
+    canvas.setClipRect(196, 92 + Y0, W - 196 - 16, 70);
+    text(b.name, 196, 100 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+    text(sub, 196, 136 + Y0, &fonts::FreeSans9pt7b, MUTED);
+    canvas.clearClipRect();
+
+    uint32_t t = now_ms();
+    bool live = sdr_state() == SdrState::Running && b.valid && b.age_ms < 5000;
+    float act = phone_activity(b);
+    int y0 = 176 + Y0;
+
+    char big[24];
+    if (live) snprintf(big, sizeof big, "+%.0f", act);
+    else snprintf(big, sizeof big, "--");
+    uint32_t col = live ? activity_color(act) : MUTED;
+    text(big, 60, y0, &fonts::FreeSansBold24pt7b, col, top_left, 3.0f);
+    canvas.setTextSize(3.0f);
+    int big_w = canvas.textWidth(big, &fonts::FreeSansBold24pt7b);
+    text("dB", 60 + big_w + 16, y0 + 20, &fonts::FreeSans18pt7b, MUTED);
+
+    int tx = P ? 60 : W / 2 + 20, ty = P ? y0 + 170 : y0;
+    if (live) {
+        text_wrap(activity_text(act), tx, ty + 10, W - tx - 40, &fonts::FreeSansBold12pt7b, TEXT, 32);
+        text_wrap("Above this band's quiet level. Phones transmit in bursts, so start a call or a speed "
+                  "test on the phone you're looking for.", tx, ty + 78, W - tx - 40, &fonts::FreeSans9pt7b,
+                  MUTED, 22);
+    } else {
+        text_wrap(s_scan_on ? sdr_status_text() : "Scanning is off", tx, ty + 10, W - tx - 40,
+                  &fonts::FreeSansBold12pt7b, WARN, 32);
+    }
+
+    // Meter: 0 .. 40 dB above quiet.
+    int my = P ? ty + 170 : y0 + 170, mx = 60, mw = W - 120, mh = 46;
+    canvas.fillRoundRect(mx, my, mw, mh, 12, PANEL);
+    if (live) {
+        int fw = std::max(24, (int)(mw * std::clamp(act / 40.0f, 0.0f, 1.0f)));
+        for (int x = 0; x < fw; x += 4)
+            canvas.fillRect(mx + x, my, std::min(4, fw - x), mh, activity_color(40.0f * x / mw));
+    }
+    canvas.drawRoundRect(mx, my, mw, mh, 12, LINE);
+    text("quiet", mx, my + mh + 8, &fonts::FreeSans9pt7b, MUTED);
+    text("strong", mx + mw, my + mh + 8, &fonts::FreeSans9pt7b, MUTED, top_right);
+
+    // Graph of the last 30 s (raw level).
+    int gy = my + mh + 44, gh = H - gy - 30, gx = mx, gw = mw;
+    canvas.fillRoundRect(gx, gy, gw, gh, 12, PANEL);
+    sdr_samples(s_samples, t - 30000);
+    float lo = b.floor_db - 3, span = 46;
+    for (const auto &sm : s_samples) {
+        float age = (t - sm.t_ms) / 30000.0f;
+        if (age > 1) continue;
+        float k = std::clamp((sm.rssi - lo) / span, 0.0f, 1.0f);
+        int xx = gx + gw - 12 - (int)(age * (gw - 24));
+        int yy = gy + gh - 10 - (int)(k * (gh - 20));
+        canvas.fillCircle(xx, yy, 4, activity_color(sm.rssi - b.floor_db));
+    }
+    text("last 30 seconds", gx + gw - 12, gy + 8, &fonts::FreeSans9pt7b, MUTED, top_right);
+
+    // Beeps speed up with activity, like the Bluetooth finder.
+    if (s_volume && live && act >= 6 && (int32_t)(t - s_next_beep) >= 0) {
+        float k = std::clamp((act - 6.0f) / 30.0f, 0.0f, 1.0f);
+        M5.Speaker.tone(700 + k * 1500, 35);
+        s_next_beep = t + (uint32_t)(1200 - k * 1100);
+    }
+}
+
 // ---------------------------------------------------------------- list
 // Starts tracking a device and opens the hot/cold screen.
+void phone_list(int sx, int sy);
+
 void open_finder(const DeviceView &d) {
     s_target_view = d;
     DeviceView shown = d;
@@ -544,19 +696,25 @@ void screen_list() {
         return;
     }
 
-    // Section switch: Bluetooth | Wi-Fi
-    Rect bt{24, 92 + Y0, 200, 56}, wf{232, 92 + Y0, 200, 56};
-    button(bt, "Bluetooth", !s_wifi_section);
+    // Section switch: Bluetooth | Wi-Fi | Phone
+    const int sw = P ? 216 : 190, sstep = P ? 228 : 198;
+    Rect bt{24, 92 + Y0, sw, 56}, wf{24 + sstep, 92 + Y0, sw, 56}, ph{24 + 2 * sstep, 92 + Y0, sw, 56};
+    button(bt, "Bluetooth", !s_wifi_section && !s_phone_section);
     button(wf, "Wi-Fi", s_wifi_section);
-    if (tapped(bt)) { s_wifi_section = false; s_page = 0; s_tap = false; }
-    if (tapped(wf)) { s_wifi_section = true; s_page = 0; s_tap = false; }
-    if (!P) canvas.drawFastVLine(452, 96, 48, LINE);
+    button(ph, "Phone", s_phone_section);
+    if (tapped(bt)) { s_wifi_section = false; s_phone_section = false; s_page = 0; s_tap = false; }
+    if (tapped(wf)) { s_wifi_section = true; s_phone_section = false; s_page = 0; s_tap = false; }
+    if (tapped(ph)) { s_wifi_section = false; s_phone_section = true; s_page = 0; s_tap = false; }
+    if (!P) canvas.drawFastVLine(628, 96, 48, LINE);
+    const int fx = P ? 24 : 644, fy = P ? 184 + Y0 : 120;     // where the per-section status line goes
+
+    if (s_phone_section) { phone_list(fx, fy); return; }
 
     if (!s_wifi_section) {
-        const char *names[] = {P ? "Trackers" : "Trackers & earbuds", "Named", "Everything"};
+        const char *names[] = {"Trackers", "Named", "Everything"};
         const Filter vals[] = {Filter::Findable, Filter::Named, Filter::All};
         for (int i = 0; i < 3; ++i) {
-            Rect r = P ? Rect{24 + i * 228, 156 + Y0, 216, 56} : Rect{472 + i * 264, 92, 252, 56};
+            Rect r = P ? Rect{24 + i * 228, 156 + Y0, 216, 56} : Rect{644 + i * 208, 92, 196, 56};
             button(r, names[i], s_filter == vals[i]);
             if (tapped(r)) { s_filter = vals[i]; s_page = 0; s_tap = false; }
         }
@@ -569,7 +727,7 @@ void screen_list() {
             snprintf(ws, sizeof ws, "Wi-Fi didn't start on the radio chip (error %d)", wifi_error());
         else
             snprintf(ws, sizeof ws, "%s...", wifi_state_text());
-        text(ws, P ? 24 : 476, P ? 184 + Y0 : 120, &fonts::FreeSans12pt7b,
+        text(ws, fx, fy, &fonts::FreeSans12pt7b,
              wifi_state() == WifiState::Failed ? BAD : MUTED, middle_left);
     }
 
@@ -1493,6 +1651,9 @@ void ui_loop_once() {
     bool wifi_view = (s_screen == Screen::List && s_wifi_section) || s_screen == Screen::Channels ||
                      (tg.active && tg.wifi_channel);
     wifi_set_wanted(s_scan_on && wifi_view);
+    // The RTL-SDR only runs while the Phone section or a phone band is on screen.
+    sdr_set_wanted(s_scan_on && ((s_screen == Screen::List && s_phone_section) || s_screen == Screen::Phone));
+    sdr_set_focus(s_screen == Screen::Phone ? s_phone_band : -1);
 
     alerts_tick();
     sdlog_tick();
@@ -1512,6 +1673,7 @@ void ui_loop_once() {
     case Screen::Clock:    screen_clock();    break;
     case Screen::History:  screen_history();  break;
     case Screen::Locked:   screen_locked();   break;
+    case Screen::Phone:    screen_phone();    break;
     }
     vol_draw();
     if (!locked) alert_draw();
@@ -1522,7 +1684,7 @@ void ui_loop_once() {
     {
         uint32_t t = now_ms();
         bool in_use = s_screen == Screen::Finder || s_screen == Screen::Sweep || s_screen == Screen::Glow ||
-                      s_screen == Screen::Rename || s_screen == Screen::Clock;
+                      s_screen == Screen::Rename || s_screen == Screen::Clock || s_screen == Screen::Phone;
         bool alert = alerts_current().active;
         locked = s_screen == Screen::Locked;
         s_dimmed = s_saver && !locked && !in_use && !alert && t - s_last_touch > 60000;

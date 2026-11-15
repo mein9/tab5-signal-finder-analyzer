@@ -21,6 +21,9 @@ void ble_start();
 // Pauses or resumes scanning (the Scan button).
 void ble_set_scanning(bool on);
 
+// Demo mode only: report "scanning" without starting the radio.
+void ble_demo_set_scanning();
+
 // Radio-chip firmware update (adds Bluetooth to a Wi-Fi-only C6 build).
 enum class RadioUpdate : uint8_t { Idle, Running, Done, Failed };
 void        radio_update_start();      // only valid when state is ControllerFailed

@@ -8,3 +8,4 @@ build.local.ps1
 *.CSV
 *.csv
 !partitions.csv
+components/esp_rtl_sdr/

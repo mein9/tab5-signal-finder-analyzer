@@ -120,3 +120,5 @@ const char *wifi_state_text() {
     }
     return "";
 }
+
+void wifi_demo_set_scanning() { s_state = WifiState::Scanning; }

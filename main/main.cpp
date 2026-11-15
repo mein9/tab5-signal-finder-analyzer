@@ -12,6 +12,8 @@
 #include "ble_scan.h"
 #include "wifi_scan.h"
 #include "devices.h"
+#include "demo.h"
+#include "sdr.h"
 #include "ui.h"
 
 static const char *TAG = "finder";
@@ -45,11 +47,17 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "board %d, display %dx%d, imu %d", (int)M5.getBoard(),
              (int)M5.Display.width(), (int)M5.Display.height(), (int)M5.Imu.isEnabled());
 
+    sdr_power_on();     // USB-A port, for an RTL-SDR dongle
     devices_init();
     ui_init();
     vTaskDelay(pdMS_TO_TICKS(300));   // give the C6 a moment after power-up
+#if FINDER_DEMO
+    demo_start();       // made-up devices, no radios
+#else
     ble_start();
     wifi_start();
+#endif
+    sdr_start();
     xTaskCreatePinnedToCore(log_task, "log", 4096, nullptr, 1, nullptr, 0);
 
     for (;;) {
