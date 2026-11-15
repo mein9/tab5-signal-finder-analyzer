@@ -630,7 +630,9 @@ void screen_list() {
         text(ago, r.x + r.w - 24, r.y + 44, &fonts::FreeSans9pt7b, MUTED, top_right);
 
         if (tapped(r)) {
+            open_finder(d);
             s_tap = false;
+            break;      // the list is no longer on screen
         }
     }
 
