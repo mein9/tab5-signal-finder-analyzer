@@ -1,4 +1,4 @@
-# Builds Signal Finder on Windows. Output: build\signal_finder.bin
+# Builds Signal Finder & Analyzer on Windows. Output: build\signal_finder.bin
 #
 # Expects ESP-IDF v5.5.x. Defaults below can be overridden with environment
 # variables, or by a build.local.ps1 next to this file (not checked in), e.g.

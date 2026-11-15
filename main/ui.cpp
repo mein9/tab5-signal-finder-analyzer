@@ -330,7 +330,7 @@ void poll_touch() {
 void draw_header(const char *title) {
     canvas.fillRect(0, 0, W, 76, PANEL);
     canvas.drawFastHLine(0, 76, W, LINE);
-    text(title, 24, 38, &fonts::FreeSansBold18pt7b, TEXT, middle_left);
+    text(title, 24, 38, &fonts::FreeSansBold12pt7b, TEXT, middle_left);
 
     BleState st = ble_state();
     uint32_t dot = st == BleState::Scanning ? GOOD
@@ -450,7 +450,7 @@ void open_finder(const DeviceView &d) {
 }
 
 void screen_list() {
-    draw_header("Signal Finder");
+    draw_header("Signal Finder & Analyzer");
     if (ble_state() == BleState::ControllerFailed || radio_update_state() != RadioUpdate::Idle) {
         radio_update_panel();
         return;
@@ -603,7 +603,7 @@ void draw_target_title(const Target &tg, const char *suffix) {
 
 // ---------------------------------------------------------------- finder
 void screen_finder() {
-    draw_header("Signal Finder");
+    draw_header("Signal Finder & Analyzer");
     Target tg = target_get();
     uint32_t t = now_ms();
     Reading r = read_target(t);
@@ -780,7 +780,7 @@ void update_heading() {
 }
 
 void screen_sweep() {
-    draw_header("Signal Finder");
+    draw_header("Signal Finder & Analyzer");
     Target tg = target_get();
     uint32_t t = now_ms();
     Reading r = read_target(t);
@@ -975,7 +975,7 @@ void screen_rename() {
 
 // ---------------------------------------------------------------- Wi-Fi channels
 void screen_channels() {
-    draw_header("Signal Finder");
+    draw_header("Signal Finder & Analyzer");
     Rect back{24, 92, 150, 56};
     button(back, "< Back");
     if (tapped(back)) { s_screen = Screen::Tools; s_tap = false; }
@@ -1052,7 +1052,7 @@ bool tool_row(int i, const char *title, const char *desc, const char *btn, bool 
 }
 
 void screen_tools() {
-    draw_header("Signal Finder");
+    draw_header("Signal Finder & Analyzer");
     Rect back{24, 92, 150, 56};
     button(back, "< Back");
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }

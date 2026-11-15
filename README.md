@@ -1,4 +1,4 @@
-# Signal Finder for the M5Stack Tab5
+# Signal Finder & Analyzer for the M5Stack Tab5
 
 A "hot / cold" finder for Bluetooth and Wi-Fi devices, for the M5Stack Tab5
 (ESP32-P4 with an ESP32-C6 radio chip). Pick a device from the list, then walk

@@ -1,4 +1,4 @@
-// Signal Finder for the M5Stack Tab5.
+// Signal Finder & Analyzer for the M5Stack Tab5.
 //
 // Lists nearby Bluetooth LE devices and Wi-Fi networks, then guides you to one with a
 // hot/cold signal meter, Geiger-style beeps, and a sweep radar that uses
