@@ -21,6 +21,7 @@
 #include "ble_scan.h"
 #include "clock.h"
 #include "devices.h"
+#include "errlog.h"
 #include "saved.h"
 #include "sdlog.h"
 #include "sdr.h"
@@ -74,6 +75,8 @@ float    s_motion_s = 0;                // seconds the Tab5 has been moving
 float    s_activity = 0;
 bool     s_forget_confirm = false;
 bool     s_off_confirm = false;          // "Power off" tapped once
+int      s_report = 0;                   // error report pop-up: 0 none, 1 asking, 2 showing the result
+uint32_t s_report_until = 0;
 char     s_edit[24] = {0};              // nickname being typed
 bool     s_shift = true;
 uint8_t  s_rotation = 3;
@@ -676,6 +679,7 @@ void screen_phone() {
 // ---------------------------------------------------------------- list
 // Starts tracking a device and opens the hot/cold screen.
 void phone_list(int sx, int sy);
+void save_report();
 
 void open_finder(const DeviceView &d) {
     s_target_view = d;
@@ -1323,7 +1327,15 @@ void screen_tools() {
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
-    text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+    if (!P) text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+
+    // Save an error report to the SD card, for sending to the developer.
+    Rect rep{W - 264 - 232, 92 + Y0, 220, 56};
+    button(rep, "Save report");
+    if (tapped(rep)) {
+        save_report();
+        s_tap = false;
+    }
 
     // Power off, top right. Two taps, so a stray touch can't switch the Tab5 off.
     Rect off{W - 264, 92 + Y0, 240, 56};
@@ -1585,6 +1597,67 @@ void vol_draw() {
     text(v, p.x + p.w - 24, ty, &fonts::FreeSansBold18pt7b, s_volume ? TEXT : MUTED, middle_right);
 }
 
+// ---------------------------------------------------------------- error report
+// What the app is doing right now, for the top of an error report.
+void save_report() {
+    char st[420];
+    Target tg = target_get();
+    snprintf(st, sizeof st,
+             "Bluetooth:    %s (error %d)\n"
+             "Wi-Fi:        %s (error %d)\n"
+             "Phone bands:  %s\n"
+             "Screen:       %d, rotation %d, %dx%d\n"
+             "Scan %s, volume %d%%, battery saver %s, battery %d%%\n"
+             "Tracking:     %s\n"
+             "SD log:       %s\n"
+             "Saved devices: %u, alerts so far: %u",
+             ble_state_text(), ble_error(), wifi_state_text(), wifi_error(), sdr_status_text(), (int)s_screen,
+             (int)s_rotation, W, H, s_scan_on ? "on" : "off", (int)s_volume, s_saver ? "on" : "off",
+             (int)M5.Power.getBatteryLevel(), !tg.active ? "nothing" : tg.wifi_channel ? "a Wi-Fi network" : "a Bluetooth device",
+             sdlog_status(), (unsigned)saved_count(), (unsigned)alerts_history_count());
+    if (errlog_save(st)) errlog_dismiss();
+    s_report = 2;
+    s_report_until = now_ms() + 6000;
+}
+
+// After a crash, offers to save a report. Drawn over whatever screen is showing.
+Rect report_panel() { return P ? Rect{24, H - 300, W - 48, 276} : Rect{40, H - 246, W - 80, 222}; }
+
+void report_input() {
+    if (!s_report) return;
+    Rect p = report_panel();
+    if (s_report == 1) {
+        const int bw2 = P ? 300 : 260;
+        Rect save{p.x + p.w - 2 * (bw2 + 16), p.y + p.h - 78, bw2, 60}, no{p.x + p.w - (bw2 + 16), p.y + p.h - 78, bw2, 60};
+        if (tapped(save)) save_report();
+        else if (tapped(no)) { errlog_dismiss(); s_report = 0; }
+    } else if (s_tap || (int32_t)(now_ms() - s_report_until) >= 0) {
+        s_report = 0;                       // result message: any tap, or time, closes it
+    }
+    if (s_tap && p.hit(s_tx, s_ty)) s_tap = false;
+}
+
+void report_draw() {
+    if (!s_report) return;
+    Rect p = report_panel();
+    if (s_report == 2) p = Rect{p.x, p.y + p.h - 110, p.w, 110};
+    canvas.fillRoundRect(p.x, p.y, p.w, p.h, 18, PANEL_HI);
+    canvas.drawRoundRect(p.x, p.y, p.w, p.h, 18, ACCENT);
+    canvas.drawRoundRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2, 17, ACCENT);
+    if (s_report == 2) {
+        text_wrap(errlog_message(), p.x + 32, p.y + 26, p.w - 64, &fonts::FreeSansBold12pt7b, TEXT, 32);
+        return;
+    }
+    text_wrap(errlog_crash_text(), p.x + 32, p.y + 20, p.w - 64, &fonts::FreeSansBold18pt7b, WARN, 40);
+    text_wrap("Save an error report to the SD card? You can send it to the developer. It has app logs "
+              "and crash details, and no names of nearby devices or networks.",
+              p.x + 32, p.y + (P ? 106 : 68), p.w - 64, &fonts::FreeSans12pt7b, TEXT, 30);
+    const int bw2 = P ? 300 : 260;
+    Rect save{p.x + p.w - 2 * (bw2 + 16), p.y + p.h - 78, bw2, 60}, no{p.x + p.w - (bw2 + 16), p.y + p.h - 78, bw2, 60};
+    button(save, "Save report", true);
+    button(no, "Not now");
+}
+
 // ---------------------------------------------------------------- alerts
 // The alert banner sits on top of whatever screen is showing. Its buttons are
 // handled before the screen underneath so a tap can't fall through.
@@ -1647,6 +1720,8 @@ void ui_init() {
     saved_load();
     alerts_init();
     clock_init();
+    // After a crash, offer to save a report - but only if there is a card to save it to.
+    if (errlog_crashed() && sdlog_mount_card()) s_report = 1;
     M5.Display.setBrightness(s_brightness);
     apply_volume();
     make_canvas();
@@ -1679,7 +1754,7 @@ void ui_loop_once() {
     alerts_tick();
     sdlog_tick();
     if (locked) s_vol_open = false;
-    else { alert_input(); vol_input(); }
+    else { report_input(); alert_input(); vol_input(); }
 
     int64_t t1 = esp_timer_get_time();
     begin_frame();
@@ -1697,7 +1772,7 @@ void ui_loop_once() {
     case Screen::Phone:    screen_phone();    break;
     }
     vol_draw();
-    if (!locked) alert_draw();
+    if (!locked) { alert_draw(); report_draw(); }
     alert_sound();
 
     // Screen brightness: full in use, dimmed when left alone (battery saver),

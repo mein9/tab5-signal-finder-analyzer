@@ -5,6 +5,9 @@
 
 #include <stdint.h>
 
+// Mounts the SD card if it isn't already. False if there is no usable card.
+bool        sdlog_mount_card();
+
 bool        sdlog_active();
 bool        sdlog_start();        // mounts the card and opens a new file
 void        sdlog_stop();

@@ -19,21 +19,20 @@
 #include "wifi_scan.h"
 #include "devices.h"
 #include "demo.h"
+#include "errlog.h"
 #include "sdr.h"
 #include "ui.h"
 
 static const char *TAG = "finder";
 
 static void log_task(void *) {
-    // Once every 3 s, print a summary to the USB serial port for debugging.
-    std::vector<DeviceView> list;
+    // Every 10 s, a one-line summary on the USB serial port (and in the error
+    // log). Counts only: no device or network names, so a saved error report
+    // says nothing about what was nearby.
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        devices_snapshot(list, Filter::All, 10000);
+        vTaskDelay(pdMS_TO_TICKS(10000));
         ESP_LOGI(TAG, "state=%s err=%d heard=%lu devices=%u", ble_state_text(), ble_error(),
-                 (unsigned long)devices_heard_total(), (unsigned)list.size());
-        for (size_t i = 0; i < list.size() && i < 6; ++i)
-            ESP_LOGI(TAG, "  %4.0f dBm  %-28s %s", list[i].rssi, list[i].label, list[i].detail);
+                 (unsigned long)devices_heard_total(), (unsigned)devices_count(10000));
     }
 }
 
@@ -120,6 +119,7 @@ static void hand_over_to_launcher_on_power_on() {
 }
 
 extern "C" void app_main(void) {
+    errlog_init();      // first, so everything after it is captured
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         // Never erase here: the NVS partition is shared with the Launcher and

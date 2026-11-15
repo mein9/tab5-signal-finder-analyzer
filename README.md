@@ -81,6 +81,12 @@ address and reading in them is made up.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
 - **Power off** - switches the Tab5 off from the More screen.
+- **Error reports** - if the app ever crashes, the next start offers to save a
+  report to the SD card (`FINDLOG/ERRnnnnn.TXT`, plus the raw crash dump as
+  `CORnnnnn.BIN`). You
+  can also save one any time from the More screen. Reports hold app logs, crash
+  details and settings, and no names or addresses of nearby devices or
+  networks. If you hit a problem, attach one to a GitHub issue.
 
 ## Limits worth knowing
 
@@ -198,6 +204,7 @@ gives about 17 frames a second.
 | `main/sdlog.cpp` | SD card log |
 | `main/clock.cpp` | Date and time |
 | `main/sdr.cpp` | Phone-band meter (RTL-SDR) |
+| `main/errlog.cpp` | Error log and crash reports |
 | `main/demo.cpp` | Demo mode |
 | `main/ui.cpp` | All screens |
 

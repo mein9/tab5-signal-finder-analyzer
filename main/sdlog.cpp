@@ -94,6 +94,7 @@ const char *kind_text(Kind k) {
 
 } // namespace
 
+bool sdlog_mount_card() { return mount(); }
 bool sdlog_active() { return s_file != nullptr; }
 uint32_t sdlog_rows() { return s_rows; }
 const char *sdlog_status() { return s_status; }
