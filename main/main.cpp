@@ -42,14 +42,16 @@ static void log_task(void *) {
 // through the Launcher.
 struct StartRecord { uint8_t rom_reason, idf_reason, launcher_init, boot_to_app, boot_timer, ddlb; };
 
-static void record_start() {
+// Returns the Launcher's "init" flag as it was when this app started
+// (1 = the Launcher was just on screen, 0 = it wasn't, 0xFF = no Launcher).
+static uint8_t record_start() {
     constexpr size_t kKeep = 12;
     StartRecord hist[kKeep] = {};
     size_t n = 0;
     nvs_handle_t h;
-    if (nvs_open("blefind", NVS_READWRITE, &h) != ESP_OK) return;
+    bool have_nvs = nvs_open("blefind", NVS_READWRITE, &h) == ESP_OK;
     size_t len = sizeof hist;
-    if (nvs_get_blob(h, "starts", hist, &len) == ESP_OK) n = len / sizeof(StartRecord);
+    if (have_nvs && nvs_get_blob(h, "starts", hist, &len) == ESP_OK) n = len / sizeof(StartRecord);
 
     StartRecord r = {};
     r.rom_reason = (uint8_t)esp_rom_get_reset_reason(0);
@@ -75,14 +77,17 @@ static void record_start() {
     }
     if (n == kKeep) { memmove(hist, hist + 1, (kKeep - 1) * sizeof(StartRecord)); --n; }
     hist[n++] = r;
-    nvs_set_blob(h, "starts", hist, n * sizeof(StartRecord));
-    nvs_commit(h);
-    nvs_close(h);
+    if (have_nvs) {
+        nvs_set_blob(h, "starts", hist, n * sizeof(StartRecord));
+        nvs_commit(h);
+        nvs_close(h);
+    }
 
     for (size_t i = 0; i < n; ++i)
         ESP_LOGI(TAG, "start %u%s: chip reset code %u, idf reason %u, launcher init=%u bootToApp=%u bootTimer=%u DDLB=%u",
                  (unsigned)(i + 1), i + 1 == n ? " (this one)" : "", hist[i].rom_reason, hist[i].idf_reason,
                  hist[i].launcher_init, hist[i].boot_to_app, hist[i].boot_timer, hist[i].ddlb);
+    return r.launcher_init;
 }
 
 // 1 = treat a USB restart as a power-on, to test the hand-over from a PC.
@@ -95,14 +100,18 @@ static void record_start() {
 // the boot loader starts this app directly and the Launcher is never seen.
 //
 // So: if this start came from a power-on, and there is a Launcher to go to,
-// make the Launcher the boot target and restart into it. Choosing this app in
-// the Launcher restarts with a "software" reset code, which lands here and
-// carries on normally.
-static void hand_over_to_launcher_on_power_on() {
+// make the Launcher the boot target and restart into it.
+//
+// The catch is that the Launcher starting this app arrives with the very same
+// reset code as a power-on. The Launcher's own "init" flag tells them apart:
+// the Launcher sets it whenever it comes up, and this app clears it on every
+// start. So flag set = the Launcher just launched us (stay); flag clear = the
+// Tab5 was switched on (hand over).
+static void hand_over_to_launcher_on_power_on(uint8_t launcher_init) {
     const int reason = (int)esp_rom_get_reset_reason(0);
     const bool power_on = reason == 1 /* power-on */ || reason == 7 /* watchdog retry at power-up */ ||
                           (HANDOVER_TEST && reason == 23 /* USB restart */);
-    if (!power_on) return;
+    if (!power_on || launcher_init != 0) return;
 
     // Only when running from a Launcher app slot, with a Launcher present.
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -127,8 +136,8 @@ extern "C" void app_main(void) {
         ESP_LOGW(TAG, "NVS unavailable (%s), continuing without it", esp_err_to_name(err));
     }
 
-    record_start();
-    hand_over_to_launcher_on_power_on();
+    uint8_t launcher_init = record_start();
+    hand_over_to_launcher_on_power_on(launcher_init);
 
     auto cfg = M5.config();
     cfg.internal_imu = true;

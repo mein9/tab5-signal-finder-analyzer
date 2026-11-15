@@ -116,6 +116,9 @@ address and reading in them is made up.
   version over the internal link. That build is included as
   `main/c6_radio_fw.bin`; it is Espressif's ESP-Hosted co-processor example
   (`bleprph_wifi_coex/cp`, Apache-2.0) built for the Tab5's C6.
+- For the Phone section: an RTL-SDR dongle in the Tab5's USB-A port. Tested
+  with the **RTL-SDR Blog V4**. The driver also lists the Blog V3 and V4 Lite,
+  Nooelec SMArt v5 and E4000 dongles, but those are untested here.
 
 ## Install
 
@@ -139,7 +142,8 @@ quirks are handled for that:
   switched on, so the Launcher's boot loader starts the installed app directly.
   When this app sees it was started that way, it makes the Launcher the boot
   target and restarts into it. Choosing the app in the Launcher brings you
-  back.
+  back. (The Launcher starting the app looks the same to the chip, so the app
+  uses the Launcher's "init" flag to tell the two apart.)
 - The Launcher keeps a flag that makes every other start skip its own screen.
   This app clears it.
 
