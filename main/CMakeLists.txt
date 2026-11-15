@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS         "main.cpp" "ble_scan.cpp" "devices.cpp" "ui.cpp" "wifi_scan.cpp"
-                 "saved.cpp" "alerts.cpp" "sdlog.cpp"
+                 "saved.cpp" "alerts.cpp" "sdlog.cpp" "clock.cpp"
     INCLUDE_DIRS "."
     REQUIRES     esp_driver_ppa esp_driver_spi esp_driver_sdspi fatfs sdmmc esp_hosted esp_wifi_remote esp_wifi esp_netif esp_event nvs_flash bt esp_timer
     # ESP-Hosted 3.0.6 co-processor firmware with Wi-Fi + Bluetooth for the C6,

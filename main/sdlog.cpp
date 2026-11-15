@@ -1,9 +1,9 @@
 #include "sdlog.h"
 
-#include <M5Unified.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include "driver/sdspi_host.h"
@@ -12,6 +12,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
+#include "clock.h"
 #include "devices.h"
 
 namespace {
@@ -133,13 +134,8 @@ void sdlog_tick() {
     if (s_last && t - s_last < kEveryMs) return;
     s_last = t | 1;
 
-    char clock[24] = "";
-    if (M5.Rtc.isEnabled()) {
-        auto dt = M5.Rtc.getDateTime();
-        if (dt.date.year >= 2024)
-            snprintf(clock, sizeof clock, "%04d-%02d-%02d %02d:%02d:%02d", dt.date.year, dt.date.month,
-                     dt.date.date, dt.time.hours, dt.time.minutes, dt.time.seconds);
-    }
+    char clock[24];
+    clock_format(clock, sizeof clock, true);
 
     devices_snapshot(s_list, Filter::Any, kEveryMs);
     for (const auto &d : s_list) {

@@ -6,6 +6,7 @@
 
 #include "nvs.h"
 
+#include "clock.h"
 #include "saved.h"
 
 namespace {
@@ -21,6 +22,8 @@ constexpr uint32_t kGoneMs = 60 * 1000;
 constexpr float kNewMinRssi = -85.0f;
 
 Alert    s_alert;
+constexpr size_t kMaxHistory = 24;
+std::vector<AlertRecord> s_history;     // oldest first
 bool     s_tracker_on = true;
 uint32_t s_last_tick = 0;
 std::vector<DeviceView> s_list;
@@ -79,6 +82,15 @@ void raise(AlertType type, const DeviceView &d, const char *title, const char *l
     s_alert.since_ms = now_ms();
     snprintf(s_alert.title, sizeof s_alert.title, "%s", title);
     snprintf(s_alert.line, sizeof s_alert.line, "%s", line);
+
+    AlertRecord rec{};
+    rec.type = type;
+    rec.at_ms = s_alert.since_ms;
+    snprintf(rec.title, sizeof rec.title, "%s", title);
+    snprintf(rec.line, sizeof rec.line, "%s", line);
+    clock_format(rec.clock, sizeof rec.clock, false);
+    if (s_history.size() >= kMaxHistory) s_history.erase(s_history.begin());
+    s_history.push_back(rec);
 }
 
 const char *shown_name(const DeviceView &d) {
@@ -138,6 +150,9 @@ void check_left_behind() {
 }
 
 } // namespace
+
+size_t alerts_history_count() { return s_history.size(); }
+const AlertRecord &alerts_history_at(size_t i) { return s_history[s_history.size() - 1 - i]; }
 
 void alerts_init() {
     nvs_handle_t h;

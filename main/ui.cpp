@@ -19,6 +19,7 @@
 
 #include "alerts.h"
 #include "ble_scan.h"
+#include "clock.h"
 #include "devices.h"
 #include "saved.h"
 #include "sdlog.h"
@@ -45,7 +46,7 @@ int  Y0 = 0;               // extra header height in portrait; screens start thi
 bool s_rotate_pending = false;
 uint8_t s_canvas_rot = 3;  // rotation the canvas is currently laid out for
 
-enum class Screen { List, Finder, Sweep, Glow, Rename, Tools, Channels };
+enum class Screen { List, Finder, Sweep, Glow, Rename, Tools, Channels, Clock, History, Locked };
 Screen   s_screen = Screen::List;
 Filter   s_filter = Filter::Findable;
 bool     s_wifi_section = false;
@@ -54,6 +55,14 @@ uint8_t  s_volume = 55;                 // percent, 0 = off
 bool     s_vol_open = false;            // volume drop-down showing
 bool     s_vol_dirty = false;           // slider moved, not saved yet
 bool     s_down = false;                // finger on the screen right now
+uint32_t s_down_since = 0;              // when it went down
+uint32_t s_last_touch = 0;              // last time the screen was touched
+uint32_t s_last_repeat = 0;
+bool     s_saver = true;                // battery saver: dim when left alone
+bool     s_dimmed = false;
+int      s_brightness = 170;
+Screen   s_lock_back = Screen::List;    // where to return after pocket mode
+struct tm s_clk = {};                   // time being edited on the clock screen
 int      s_cur_x = 0, s_cur_y = 0;      // where it is
 bool     s_scan_on = true;
 Screen   s_tools_back = Screen::List;   // where "Back" on the More screen goes
@@ -93,6 +102,17 @@ struct Rect {
 };
 
 bool tapped(const Rect &r) { return s_tap && r.hit(s_tx, s_ty); }
+
+// Like tapped(), but keeps firing while the finger stays on the button.
+bool tapped_repeat(const Rect &r) {
+    if (tapped(r)) { s_last_repeat = now_ms(); return true; }
+    uint32_t t = now_ms();
+    if (s_down && r.hit(s_cur_x, s_cur_y) && t - s_down_since > 450 && t - s_last_repeat > 110) {
+        s_last_repeat = t;
+        return true;
+    }
+    return false;
+}
 
 void text(const char *s, int x, int y, const lgfx::IFont *font, uint32_t color,
           textdatum_t datum = top_left, float size = 1.0f) {
@@ -186,6 +206,7 @@ void save_settings() {
     if (nvs_open("blefind", NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, "rot", s_rotation);
     nvs_set_u8(h, "volp", s_volume);
+    nvs_set_u8(h, "sav", s_saver ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -195,6 +216,7 @@ void load_settings() {
     if (nvs_open("blefind", NVS_READONLY, &h) != ESP_OK) return;
     uint8_t v;
     if (nvs_get_u8(h, "rot", &v) == ESP_OK && v <= 3) s_rotation = v;
+    if (nvs_get_u8(h, "sav", &v) == ESP_OK) s_saver = v != 0;
     if (nvs_get_u8(h, "volp", &v) == ESP_OK && v <= 100) s_volume = v;
     else if (nvs_get_u8(h, "vol", &v) == ESP_OK && v <= 3) {              // older 4-step setting
         static const uint8_t kStep[] = {0, 25, 55, 100};
@@ -371,9 +393,14 @@ int  s_latch_x = 0, s_latch_y = 0;
 void poll_touch() {
     M5.update();
     auto td = M5.Touch.getDetail();
-    if (td.wasPressed()) { s_tap_latched = true; s_latch_x = td.x; s_latch_y = td.y; }
+    if (td.wasPressed()) {
+        s_tap_latched = true;
+        s_latch_x = td.x;
+        s_latch_y = td.y;
+        s_down_since = now_ms();
+    }
     s_down = td.isPressed();
-    if (s_down) { s_cur_x = td.x; s_cur_y = td.y; }
+    if (s_down) { s_cur_x = td.x; s_cur_y = td.y; s_last_touch = now_ms(); }
 }
 
 // ---------------------------------------------------------------- header
@@ -1115,13 +1142,16 @@ void screen_channels() {
 
 // ---------------------------------------------------------------- More
 // One settings row: title, description, and a button on the right.
+// Two columns of five in landscape, one column of ten in portrait.
 bool tool_row(int i, const char *title, const char *desc, const char *btn, bool on, uint32_t desc_color = MUTED) {
-    const int top = 164 + Y0, rh = P ? 124 : 86;
-    Rect r{24, top + i * rh, W - 48, rh - 10};
+    const int top = 164 + Y0, rh = P ? 104 : 108, colw = P ? W - 48 : (W - 48 - 16) / 2, bwid = P ? 200 : 170;
+    Rect r = P ? Rect{24, top + i * rh, colw, rh - 10} : Rect{24 + (i / 5) * (colw + 16), top + (i % 5) * rh, colw, rh - 10};
     canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
     text(title, r.x + 24, r.y + 10, &fonts::FreeSansBold12pt7b, TEXT);
-    text_wrap(desc, r.x + 24, r.y + 42, r.w - 24 - 252, &fonts::FreeSans9pt7b, desc_color, 22);
-    Rect b{r.x + r.w - 236, r.y + (r.h - 56) / 2, 220, 56};
+    canvas.setClipRect(r.x, r.y, r.w, r.h);
+    text_wrap(desc, r.x + 24, r.y + 42, r.w - 24 - bwid - 32, &fonts::FreeSans9pt7b, desc_color, 22);
+    canvas.clearClipRect();
+    Rect b{r.x + r.w - bwid - 16, r.y + (r.h - 56) / 2, bwid, 56};
     button(b, btn, on);
     if (tapped(b)) { s_tap = false; return true; }
     return false;
@@ -1135,42 +1165,192 @@ void screen_tools() {
     text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
     char d[160];
-    if (tool_row(0, "Tracker alert",
-                 "Warns you if an AirTag, Tile or SmartTag stays near you for 10+ minutes while you're moving.",
+    if (tool_row(0, "Tracker alert", "Warns if an AirTag, Tile or SmartTag stays with you for 10+ minutes while moving.",
                  alerts_tracker_enabled() ? "On" : "Off", alerts_tracker_enabled()))
         alerts_set_tracker_enabled(!alerts_tracker_enabled());
 
     if (alerts_watch_active())
-        snprintf(d, sizeof d, "Watching. %u devices count as normal - anything else that shows up raises an alert.",
-                 (unsigned)alerts_watch_known());
+        snprintf(d, sizeof d, "Watching. %u devices count as normal.", (unsigned)alerts_watch_known());
     else
-        snprintf(d, sizeof d, "Marks what's around right now as normal, then alerts when a new Bluetooth device appears.");
+        snprintf(d, sizeof d, "Marks what's here now as normal, then alerts on new Bluetooth devices.");
     if (tool_row(1, "New-device watch", d, alerts_watch_active() ? "Stop" : "Start", alerts_watch_active())) {
         if (alerts_watch_active()) alerts_watch_stop();
         else alerts_watch_start();
     }
 
-    if (tool_row(2, "Log to SD card", sdlog_status(), sdlog_active() ? "Stop" : "Start", sdlog_active())) {
+    snprintf(d, sizeof d, "%u alerts since power-on.", (unsigned)alerts_history_count());
+    if (tool_row(2, "Alert history", d, "Open", false)) s_screen = Screen::History;
+
+    if (tool_row(3, "Pocket mode", "Locks the touch screen. Alerts and alarms keep working.", "Lock", false)) {
+        s_lock_back = s_tools_back;
+        s_screen = Screen::Locked;
+        s_down_since = now_ms();
+    }
+
+    if (tool_row(4, "Battery saver", "Dims the screen after a minute without a touch.", s_saver ? "On" : "Off", s_saver)) {
+        s_saver = !s_saver;
+        save_settings();
+    }
+
+    if (tool_row(5, "Log to SD card", sdlog_status(), sdlog_active() ? "Stop" : "Start", sdlog_active())) {
         if (sdlog_active()) sdlog_stop();
         else sdlog_start();
     }
 
-    if (tool_row(3, "Wi-Fi channel chart", "Shows which channels nearby networks use, and the least crowded one.",
-                 "Open", false))
+    if (tool_row(6, "Wi-Fi channel chart", "Networks per channel, and the least crowded one.", "Open", false))
         s_screen = Screen::Channels;
 
-    snprintf(d, sizeof d, "%u saved (pins, names, alarms). Change them from a device's finder screen.",
-             (unsigned)saved_count());
-    if (tool_row(4, "Saved devices", d, s_forget_confirm ? "Tap to confirm" : "Forget all", s_forget_confirm)) {
+    char now[24];
+    clock_format(now, sizeof now, false);
+    if (now[0]) snprintf(d, sizeof d, "%s  -  stamps the SD log and alerts.", now);
+    else snprintf(d, sizeof d, "Not set. The SD log shows seconds since power-on.");
+    if (tool_row(7, "Clock", d, "Set", false, now[0] ? MUTED : WARN)) {
+        clock_now(&s_clk);
+        s_clk.tm_sec = 0;
+        s_screen = Screen::Clock;
+    }
+
+    snprintf(d, sizeof d, "%u saved (pins, names, alarms).", (unsigned)saved_count());
+    if (tool_row(8, "Saved devices", d, s_forget_confirm ? "Confirm" : "Forget all", s_forget_confirm)) {
         if (s_forget_confirm) { saved_clear(); s_forget_confirm = false; }
         else if (saved_count()) s_forget_confirm = true;
     }
 
-    if (tool_row(5, "Screen", "Turns the screen a quarter turn each tap: wide, tall, wide upside-down, tall upside-down.",
-                 "Rotate", false)) {
+    if (tool_row(9, "Screen", "Quarter turn each tap: wide, tall, and both upside-down.", "Rotate", false)) {
         s_rotation = (s_rotation + 1) % 4;
         save_settings();
         s_rotate_pending = true;          // applied at the start of the next frame
+    }
+}
+
+// ---------------------------------------------------------------- clock
+int days_in_month(int year, int mon0) {
+    static const int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    return mon0 == 1 && leap ? 29 : kDays[mon0];
+}
+
+void screen_clock() {
+    text("Set the date and time", 24, 20, &fonts::FreeSansBold18pt7b, TEXT);
+    text_wrap("Kept by the Tab5's clock chip, and used to stamp the SD log and alerts. Hold + or - to go faster.",
+              24, 70, W - 48, &fonts::FreeSans9pt7b, MUTED, 22);
+
+    static const char *kNames[] = {"Year", "Month", "Day", "Hour", "Minute"};
+    int *field[] = {&s_clk.tm_year, &s_clk.tm_mon, &s_clk.tm_mday, &s_clk.tm_hour, &s_clk.tm_min};
+    const int pitch = (W - 48) / 5, cw = pitch - 12, y0 = P ? 220 : 150;
+    for (int i = 0; i < 5; ++i) {
+        int x = 24 + i * pitch + 6;
+        text(kNames[i], x + cw / 2, y0, &fonts::FreeSans12pt7b, MUTED, top_center);
+        Rect up{x, y0 + 40, cw, 84}, dn{x, y0 + 250, cw, 84};
+        button(up, "+");
+        button(dn, "-");
+        int shown = i == 0 ? *field[i] + 1900 : i == 1 ? *field[i] + 1 : *field[i];
+        char v[8];
+        snprintf(v, sizeof v, i == 0 ? "%d" : "%02d", shown);
+        text(v, x + cw / 2, y0 + 187, &fonts::FreeSansBold24pt7b, TEXT, middle_center);
+        int step = tapped_repeat(up) ? 1 : tapped_repeat(dn) ? -1 : 0;
+        if (step) {
+            *field[i] += step;
+            if (i == 2) {       // the day wraps within the month
+                int last = days_in_month(s_clk.tm_year + 1900, s_clk.tm_mon);
+                if (s_clk.tm_mday > last) s_clk.tm_mday = 1;
+                else if (s_clk.tm_mday < 1) s_clk.tm_mday = last;
+            }
+            s_tap = false;
+        }
+    }
+    // Keep every field in range; wrap around at the ends.
+    auto wrap = [](int &v, int lo, int hi) { if (v > hi) v = lo; else if (v < lo) v = hi; };
+    wrap(s_clk.tm_year, 124, 199);              // 2024 .. 2099
+    wrap(s_clk.tm_mon, 0, 11);
+    wrap(s_clk.tm_hour, 0, 23);
+    wrap(s_clk.tm_min, 0, 59);
+    int dim = days_in_month(s_clk.tm_year + 1900, s_clk.tm_mon);
+    if (s_clk.tm_mday > dim) s_clk.tm_mday = dim;      // e.g. the 31st after switching to a shorter month
+    if (s_clk.tm_mday < 1) s_clk.tm_mday = 1;
+
+    Rect cancel{24, H - 100, 220, 76}, save{W - 244, H - 100, 220, 76};
+    button(cancel, "Cancel");
+    button(save, "Save", true);
+    if (tapped(cancel)) { s_screen = Screen::Tools; s_tap = false; }
+    if (tapped(save)) {
+        clock_set(s_clk);
+        s_screen = Screen::Tools;
+        s_tap = false;
+    }
+}
+
+// ---------------------------------------------------------------- alert history
+void screen_history() {
+    draw_header("Signal Finder & Analyzer");
+    Rect back{24, 92 + Y0, 150, 56};
+    button(back, "< Back");
+    if (tapped(back)) { s_screen = Screen::Tools; s_tap = false; }
+    text("Alert history", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+
+    const int top = 164 + Y0, rh = P ? 112 : 88;
+    size_t n = alerts_history_count();
+    if (!n) {
+        text_wrap("No alerts since the Tab5 was switched on. Tracker, new-device and left-behind alerts are listed here, newest first.",
+                  48, top + 60, W - 96, &fonts::FreeSans12pt7b, MUTED, 34);
+        return;
+    }
+    uint32_t t = now_ms();
+    for (size_t i = 0; i < n; ++i) {
+        Rect r{24, top + (int)i * rh, W - 48, rh - 10};
+        if (r.y + r.h > H - 10) break;
+        const AlertRecord &a = alerts_history_at(i);
+        uint32_t col = a.type == AlertType::NewDevice ? ACCENT : BAD;
+        canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
+        canvas.fillRoundRect(r.x, r.y, 8, r.h, 4, col);
+        char when[40];
+        uint32_t mins = (t - a.at_ms) / 60000;
+        if (a.clock[0]) snprintf(when, sizeof when, "%s", a.clock);
+        else if (mins < 1) snprintf(when, sizeof when, "just now");
+        else if (mins < 120) snprintf(when, sizeof when, "%lu min ago", (unsigned long)mins);
+        else snprintf(when, sizeof when, "%lu h ago", (unsigned long)(mins / 60));
+        text(when, r.x + r.w - 20, r.y + 12, &fonts::FreeSans9pt7b, MUTED, top_right);
+        canvas.setClipRect(r.x, r.y, r.w - 190, r.h);
+        text(a.title, r.x + 28, r.y + 10, &fonts::FreeSansBold12pt7b, col);
+        canvas.clearClipRect();
+        canvas.setClipRect(r.x, r.y, r.w, r.h);
+        text_wrap(a.line, r.x + 28, r.y + 42, r.w - 56, &fonts::FreeSans9pt7b, TEXT, 22);
+        canvas.clearClipRect();
+    }
+}
+
+// ---------------------------------------------------------------- pocket mode
+// Touch does nothing except a two-second hold on the circle. Scanning, the
+// tracker alert, the new-device watch and left-behind alarms all keep running.
+void screen_locked() {
+    canvas.fillScreen(0x000000u);
+    const Alert &a = alerts_current();
+    int cx = W / 2, cy = H / 2 + (P ? 120 : 70), R = 96;
+    if (a.active) {
+        uint32_t col = a.type == AlertType::NewDevice ? ACCENT : BAD;
+        text(a.title, W / 2, P ? 200 : 70, &fonts::FreeSansBold18pt7b, col, middle_center);
+        text_wrap(a.line, 48, P ? 250 : 110, W - 96, &fonts::FreeSans12pt7b, TEXT, 32);
+    } else {
+        text("Pocket mode", W / 2, P ? 240 : 90, &fonts::FreeSansBold18pt7b, MUTED, middle_center);
+        text("Alerts and alarms are still on.", W / 2, P ? 290 : 136, &fonts::FreeSans12pt7b, MUTED, middle_center);
+    }
+    bool on_circle = s_down && (s_cur_x - cx) * (s_cur_x - cx) + (s_cur_y - cy) * (s_cur_y - cy) <= (R + 30) * (R + 30);
+    static uint32_t hold_from = 0;
+    uint32_t t = now_ms();
+    if (!on_circle) hold_from = 0;
+    else if (!hold_from) hold_from = t;
+    float k = hold_from ? std::clamp((t - hold_from) / 2000.0f, 0.0f, 1.0f) : 0.0f;
+    canvas.fillCircle(cx, cy, R, PANEL);
+    canvas.drawCircle(cx, cy, R, LINE);
+    if (k > 0) canvas.fillArc(cx, cy, R + 14, R + 2, -90, -90 + 360 * k, ACCENT);
+    text("Hold", cx, cy - 14, &fonts::FreeSansBold12pt7b, TEXT, middle_center);
+    text("2 seconds", cx, cy + 18, &fonts::FreeSans9pt7b, MUTED, middle_center);
+    text(a.active ? "Hold the circle to unlock and respond" : "Hold the circle to unlock", cx, cy + R + 50,
+         &fonts::FreeSans12pt7b, MUTED, middle_center);
+    if (k >= 1.0f) {
+        hold_from = 0;
+        s_screen = s_lock_back;
+        s_last_touch = t;
     }
 }
 
@@ -1265,8 +1445,12 @@ void alert_draw() {
     button(find, "Find it", true);
     if (a.type == AlertType::Tracker) button(mine, "It's mine");
     button(no, "Dismiss");
+}
 
-    // Alarm sound: two-tone for trackers and left-behind (20 s), a short chirp for new devices.
+// Alarm sound: two-tone for trackers and left-behind (20 s), a short chirp for new devices.
+void alert_sound() {
+    const Alert &a = alerts_current();
+    if (!a.active) return;
     static uint32_t next = 0;
     uint32_t t = now_ms(), el = t - a.since_ms;
     uint32_t limit = a.type == AlertType::NewDevice ? 900 : 20000;
@@ -1282,7 +1466,8 @@ void ui_init() {
     load_settings();
     saved_load();
     alerts_init();
-    M5.Display.setBrightness(170);
+    clock_init();
+    M5.Display.setBrightness(s_brightness);
     apply_volume();
     make_canvas();
 }
@@ -1295,6 +1480,9 @@ void ui_loop_once() {
     s_tx = s_latch_x;
     s_ty = s_latch_y;
     s_tap_latched = false;
+    bool locked = s_screen == Screen::Locked;
+    // The tap that wakes a dimmed screen does nothing else; pocket mode ignores taps.
+    if (s_dimmed || locked) s_tap = false;
 
     update_heading();
 
@@ -1306,8 +1494,8 @@ void ui_loop_once() {
 
     alerts_tick();
     sdlog_tick();
-    alert_input();
-    vol_input();
+    if (locked) s_vol_open = false;
+    else { alert_input(); vol_input(); }
 
     int64_t t1 = esp_timer_get_time();
     begin_frame();
@@ -1319,9 +1507,26 @@ void ui_loop_once() {
     case Screen::Rename: screen_rename(); break;
     case Screen::Tools:  screen_tools();  break;
     case Screen::Channels: screen_channels(); break;
+    case Screen::Clock:    screen_clock();    break;
+    case Screen::History:  screen_history();  break;
+    case Screen::Locked:   screen_locked();   break;
     }
     vol_draw();
-    alert_draw();
+    if (!locked) alert_draw();
+    alert_sound();
+
+    // Screen brightness: full in use, dimmed when left alone (battery saver),
+    // nearly off in pocket mode unless an alert is showing.
+    {
+        uint32_t t = now_ms();
+        bool in_use = s_screen == Screen::Finder || s_screen == Screen::Sweep || s_screen == Screen::Glow ||
+                      s_screen == Screen::Rename || s_screen == Screen::Clock;
+        bool alert = alerts_current().active;
+        locked = s_screen == Screen::Locked;
+        s_dimmed = s_saver && !locked && !in_use && !alert && t - s_last_touch > 60000;
+        int want = locked ? (alert ? 140 : 12) : s_dimmed ? 30 : 170;
+        if (want != s_brightness) { M5.Display.setBrightness(want); s_brightness = want; }
+    }
     int64_t t2 = esp_timer_get_time();
     poll_touch();
     push_frame();
@@ -1334,5 +1539,14 @@ void ui_loop_once() {
                  s_motion_s, s_activity);
         a_in = a_draw = a_push = 0; frames = 0; last = t3;
     }
-    vTaskDelay(1);
+    if (s_dimmed || locked) {
+        // Nothing much to show: redraw about five times a second to save power,
+        // but keep checking for a touch so waking up feels instant.
+        for (int i = 0; i < 8 && !s_tap_latched && !s_down; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(22));
+            poll_touch();
+        }
+    } else {
+        vTaskDelay(1);
+    }
 }

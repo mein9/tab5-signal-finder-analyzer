@@ -32,6 +32,9 @@ hidden access point.
   SmartTag stays near you for 10+ minutes while the Tab5 is being carried.
 - **New-device watch** â€“ mark the surroundings as normal, then get an alert
   when a new Bluetooth device shows up.
+- **Alert history** – past alerts since power-on, newest first.
+- **Pocket mode** – locks the touch screen (hold a circle for two seconds to
+  unlock) while scanning, alerts and alarms keep running.
 
 **Tools**
 
@@ -39,6 +42,10 @@ hidden access point.
   channels 1, 6 and 11.
 - **Log to SD card** â€“ writes what it hears to `FINDLOG/LOGnnnnn.CSV` every
   10 seconds.
+- **Clock** – set the date and time once; the Tab5's clock chip keeps it and it
+  stamps the SD log and alerts.
+- **Battery saver** – dims the screen and slows redraws after a minute without
+  a touch.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
 
@@ -119,4 +126,5 @@ gives about 17 frames a second.
 | `main/saved.cpp` | Pinned / renamed / alarmed devices, stored in flash |
 | `main/alerts.cpp` | Tracker, new-device and left-behind alerts |
 | `main/sdlog.cpp` | SD card log |
+| `main/clock.cpp` | Date and time |
 | `main/ui.cpp` | All screens |
