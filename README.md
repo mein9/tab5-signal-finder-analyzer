@@ -94,6 +94,13 @@ address and reading in them is made up.
   window offers to delete it too; that is off unless you switch it on. A PC
   can do the same by sending `sdcopy` (or `sdclean`, to delete older copies)
   over the USB serial port.
+- **Keyboard** - with the M5Stack Tab5 Keyboard attached, the whole app works
+  without touching the screen. The arrow keys move a highlight to the nearest
+  button in that direction and Enter presses it; in the lists they move through
+  the rows. Esc is Back. Typing goes straight into the Rename screen.
+  Shortcuts on the list: Tab next section, 1 / 2 / 3 filters, M More, Space
+  scan on/off. On the hot / cold screen: P pin, A alarm, R rename, C colour
+  view, S sweep radar.
 - **Error reports** - if the app ever crashes, the next start offers to save a
   report to the SD card (`FINDLOG/ERRnnnnn.TXT`, plus the raw crash dump as
   `CORnnnnn.BIN`). You
@@ -129,6 +136,8 @@ address and reading in them is made up.
   version over the internal link. That build is included as
   `main/c6_radio_fw.bin`; it is Espressif's ESP-Hosted co-processor example
   (`bleprph_wifi_coex/cp`, Apache-2.0) built for the Tab5's C6.
+- Optional: the M5Stack **Tab5 Keyboard** (I2C address 0x6D on G0 / G1). It is
+  found automatically, also when attached while the app is running.
 - For the Phone section: an RTL-SDR dongle in the Tab5's USB-A port. Tested
   with the **RTL-SDR Blog V4**. The driver also lists the Blog V3 and V4 Lite,
   Nooelec SMArt v5 and E4000 dongles, but those are untested here.
@@ -225,6 +234,7 @@ gives about 17 frames a second.
 | `main/sdr.cpp` | Phone-band meter (RTL-SDR) |
 | `main/errlog.cpp` | Error log and crash reports |
 | `main/selfcopy.cpp` | Copy the app to the SD card; USB commands |
+| `main/kbd.cpp` | Tab5 Keyboard (I2C) |
 | `main/demo.cpp` | Demo mode |
 | `main/ui.cpp` | All screens |
 

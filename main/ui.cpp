@@ -26,6 +26,7 @@
 #include "sdlog.h"
 #include "sdr.h"
 #include "selfcopy.h"
+#include "kbd.h"
 #include "wifi_scan.h"
 
 namespace {
@@ -62,6 +63,12 @@ float    s_scroll_at_press = 0;
 bool     s_list_press = false;           // the finger went down on the list
 bool     s_list_dragged = false;         // ...and has moved far enough to count as a scroll
 int      s_list_last_y = 0;
+int      s_key = 0;                      // this frame's key from the Tab5 Keyboard (0: none)
+int      s_phone_sel = -1;               // Phone section: highlighted band
+bool     s_sel_on = false;               // a list row is highlighted (keyboard)
+int      s_sel_idx = 0;
+uint8_t  s_sel_addr[6] = {0};
+uint8_t  s_sel_type = 0;
 bool     s_release = false;              // the finger was lifted this frame
 bool     s_click_now = false;            // this frame's tap came from a PC: press and release at once
 uint8_t  s_volume = 55;                 // percent, 0 = off
@@ -125,6 +132,77 @@ struct Rect {
 
 bool tapped(const Rect &r) { return s_tap && r.hit(s_tx, s_ty); }
 
+// Gives a button a keyboard key: pressing it counts as a tap on the button.
+// Letters match either case.
+void hot(const Rect &r, int key);
+
+// Keyboard focus. Every button drawn in a frame is noted; the arrow keys move
+// a highlight to the nearest button in that direction (using the buttons of
+// the frame before), and Enter presses the highlighted one.
+constexpr int kMaxNav = 72;
+Rect s_nav[kMaxNav], s_nav_prev[kMaxNav];
+int  s_nav_n = 0, s_nav_prev_n = 0;
+bool s_foc_on = false;
+int  s_foc_x = 0, s_foc_y = 0;          // a point inside the highlighted button
+
+void focus_outline(const Rect &r) {
+    canvas.drawRoundRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6, 15, ACCENT);
+    canvas.drawRoundRect(r.x - 2, r.y - 2, r.w + 4, r.h + 4, 14, ACCENT);
+}
+
+// Moves the highlight from (px, py) to the nearest button in the direction of
+// an arrow key. False if there is none that way.
+bool nav_move(int px, int py, int key) {
+    int best = -1;
+    long best_score = 0;
+    Rect from{px, py, 1, 1};                // the button the highlight is on now, if any
+    for (int i = 0; i < s_nav_prev_n; ++i)
+        if (s_nav_prev[i].hit(px, py)) from = s_nav_prev[i];
+    const bool vertical = key == K_UP || key == K_DOWN;
+    for (int i = 0; i < s_nav_prev_n; ++i) {
+        const Rect &r = s_nav_prev[i];
+        if (r.hit(px, py)) continue;
+        int dx = r.x + r.w / 2 - px, dy = r.y + r.h / 2 - py;
+        int along = key == K_UP ? -dy : key == K_DOWN ? dy : key == K_LEFT ? -dx : dx;
+        int across = (key == K_UP || key == K_DOWN) ? abs(dx) : abs(dy);
+        if (along <= 4) continue;
+        // Buttons in the same row (or column) win, then ones roughly straight
+        // ahead; ones off to the side only count when there is nothing else.
+        bool in_line = vertical ? (r.x < from.x + from.w && from.x < r.x + r.w)
+                                : (r.y < from.y + from.h && from.y < r.y + r.h);
+        if (!vertical && !in_line && across > along) continue;     // sideways keys don't jump rows
+        long score = along + 2L * across + (in_line ? 0L : across <= along ? 100000L : 200000L);
+        if (best < 0 || score < best_score) { best = i; best_score = score; }
+    }
+    if (best < 0) return false;
+    s_foc_x = s_nav_prev[best].x + s_nav_prev[best].w / 2;
+    s_foc_y = s_nav_prev[best].y + s_nav_prev[best].h / 2;
+    s_foc_on = true;
+    return true;
+}
+
+void hot(const Rect &r, int key);
+
+// Called for every button as it is drawn.
+void nav_button(const Rect &r) {
+    if (s_nav_n < kMaxNav) s_nav[s_nav_n++] = r;
+    if (s_foc_on && r.hit(s_foc_x, s_foc_y)) {
+        focus_outline(r);
+        hot(r, K_ENTER);
+    }
+}
+
+void hot(const Rect &r, int key) {
+    int c = s_key;
+    if (key >= 'a' && key <= 'z' && c >= 'A' && c <= 'Z') c += 32;
+    if (!c || c != key) return;
+    s_key = 0;
+    s_tap = true;
+    s_click_now = true;
+    s_tx = r.x + r.w / 2;
+    s_ty = r.y + r.h / 2;
+}
+
 // Like tapped(), but keeps firing while the finger stays on the button.
 bool tapped_repeat(const Rect &r) {
     if (tapped(r)) { s_last_repeat = now_ms(); return true; }
@@ -176,6 +254,7 @@ void button(const Rect &r, const char *label, bool on = false) {
     canvas.drawRoundRect(r.x, r.y, r.w, r.h, 14, on ? ACCENT : LINE);
     text(label, r.x + r.w / 2, r.y + r.h / 2, &fonts::FreeSansBold12pt7b, on ? BG : TEXT,
          middle_center);
+    nav_button(r);
 }
 
 // A button that sits on a pop-up window. Pop-ups use the same shade as a
@@ -540,6 +619,10 @@ void draw_header(const char *title) {
     else snprintf(vl, sizeof vl, "Sound off");
     button(vol, vl, s_vol_open || s_volume > 0);
     button(more, "More", s_screen == Screen::Tools);
+    if (s_screen == Screen::List) {
+        hot(more, 'm');
+        hot(scan, ' ');
+    }
     if (tapped(scan)) {
         s_scan_on = !s_scan_on;
         ble_set_scanning(s_scan_on);
@@ -624,6 +707,11 @@ const char *activity_text(float db) {
 
 // The Phone section of the list: one row per cellular band.
 void phone_list(int sx, int sy) {
+    if (s_key == K_UP && s_phone_sel <= 0) {            // above the first band: the buttons at the top
+        nav_move(100, 164 + Y0, K_UP);
+        s_phone_sel = -1;
+        s_key = 0;
+    }
     SdrState st = sdr_state();
     uint32_t sc = st == SdrState::Running ? MUTED : st == SdrState::Failed ? BAD : WARN;
     canvas.setClipRect(sx, sy - 24, W - sx - 16, 48);
@@ -640,6 +728,12 @@ void phone_list(int sx, int sy) {
         return;
     }
 
+    if (s_key == K_DOWN || s_key == K_UP) {              // keyboard: move the highlight
+        int n = (int)sdr_band_count();
+        s_phone_sel = s_phone_sel < 0 ? 0 : std::min(std::max(s_phone_sel + (s_key == K_DOWN ? 1 : -1), 0), n - 1);
+        s_key = 0;
+    }
+    if (s_tap || s_foc_on) s_phone_sel = -1;
     for (size_t i = 0; i < sdr_band_count(); ++i) {
         SdrBand b = sdr_band(i);
         Rect r{24, top + (int)i * row_h, W - 48, row_h - 8};
@@ -666,6 +760,10 @@ void phone_list(int sx, int sy) {
             text(v, r.x + r.w - 24, r.y + 12, &fonts::FreeSansBold12pt7b, activity_color(act), top_right);
             text(act >= 8 ? "active" : "quiet", r.x + r.w - 24, r.y + 44, &fonts::FreeSans9pt7b, MUTED, top_right);
         }
+        if ((int)i == s_phone_sel) {
+            focus_outline(Rect{r.x + 3, r.y + 3, r.w - 6, r.h - 6});
+            hot(r, K_ENTER);
+        }
         if (b.in_range && tapped(r)) {
             s_phone_band = (int)i;
             s_screen = Screen::Phone;
@@ -684,6 +782,7 @@ void screen_phone() {
     SdrBand b = sdr_band((size_t)s_phone_band);
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
+    hot(back, K_ESC);
     if (tapped(back)) { s_screen = Screen::List; s_tap = false; }
     char sub[112];
     if (b.valid) snprintf(sub, sizeof sub, "%s  |  strongest near %.0f MHz", b.detail, b.peak_hz / 1e6f);
@@ -790,6 +889,7 @@ void screen_list() {
     button(bt, "Bluetooth", !s_wifi_section && !s_phone_section);
     button(wf, "Wi-Fi", s_wifi_section);
     button(ph, "Phone", s_phone_section);
+    hot(s_phone_section ? bt : s_wifi_section ? ph : wf, K_TAB);
     if (tapped(bt)) { s_wifi_section = false; s_phone_section = false; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
     if (tapped(wf)) { s_wifi_section = true; s_phone_section = false; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
     if (tapped(ph)) { s_wifi_section = false; s_phone_section = true; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
@@ -804,6 +904,7 @@ void screen_list() {
         for (int i = 0; i < 3; ++i) {
             Rect r = P ? Rect{24 + i * 228, 156 + Y0, 216, 56} : Rect{644 + i * 208, 92, 196, 56};
             button(r, names[i], s_filter == vals[i]);
+            hot(r, '1' + i);
             if (tapped(r)) { s_filter = vals[i]; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
         }
     } else {
@@ -839,6 +940,7 @@ void screen_list() {
     if (s_tap && view.hit(s_tx, s_ty)) {
         if (s_click_now) { click = true; cx = s_tx; cy = s_ty; }
         else {
+            s_sel_on = false;
             s_list_press = true;
             s_list_dragged = false;
             s_scroll_at_press = s_scroll;
@@ -869,6 +971,38 @@ void screen_list() {
     } else {
         s_scroll_vel = 0;
     }
+    // Keyboard: the arrows move a highlight through the list, Enter opens it.
+    int sel = -1;
+    if (s_foc_on) s_sel_on = false;                     // the highlight is on a button instead
+    if (s_sel_on) {
+        for (size_t i = 0; i < s_list.size(); ++i)
+            if (s_list[i].addr_type == s_sel_type && memcmp(s_list[i].addr, s_sel_addr, 6) == 0) { sel = (int)i; break; }
+        if (sel < 0) sel = std::min(s_sel_idx, (int)s_list.size() - 1);    // it left: stay nearby
+    }
+    if (s_key == K_UP && sel <= 0) {                    // above the first row: the buttons at the top
+        nav_move(100, top, K_UP);
+        s_sel_on = false;
+        sel = -1;
+        s_key = 0;
+    }
+    if ((s_key == K_DOWN || s_key == K_UP) && !s_list.empty()) {
+        if (sel < 0) sel = std::min((int)s_list.size() - 1, ((int)s_scroll + row_h - 1) / row_h);
+        else sel = std::min(std::max(sel + (s_key == K_DOWN ? 1 : -1), 0), (int)s_list.size() - 1);
+        s_sel_on = true;
+        if (sel * row_h < s_scroll) s_scroll = sel * row_h;
+        if ((sel + 1) * row_h - 8 > s_scroll + view_h) s_scroll = (sel + 1) * row_h - 8 - view_h;
+        s_scroll_vel = 0;
+        s_key = 0;
+    }
+    if (sel >= 0) {
+        s_sel_idx = sel;
+        memcpy(s_sel_addr, s_list[sel].addr, 6);
+        s_sel_type = s_list[sel].addr_type;
+    } else {
+        s_sel_on = false;
+    }
+    int key_open = -1;
+    if (s_key == K_ENTER && sel >= 0) { key_open = sel; s_key = 0; }
     if (s_scroll < 0 || s_scroll > max_scroll) s_scroll_vel = 0;
     s_scroll = std::min(std::max(s_scroll, 0.0f), max_scroll);
 
@@ -908,6 +1042,10 @@ void screen_list() {
             canvas.drawFastHLine(r.x, r.y + r.h - 1 - dy, cut, BG);
             canvas.drawFastHLine(r.x + r.w - cut, r.y + r.h - 1 - dy, cut, BG);
         }
+        if ((int)idx == sel) {                                      // keyboard highlight
+            canvas.drawRoundRect(r.x, r.y, r.w, r.h, 12, ACCENT);
+            canvas.drawRoundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 11, ACCENT);
+        }
         signal_bars(r.x + 20, r.y + 16, d.rssi);
         Saved *sv = saved_find(d);
         const char *label = sv && sv->name[0] ? sv->name : d.label;
@@ -937,7 +1075,7 @@ void screen_list() {
         else snprintf(ago, sizeof ago, "%lus ago", (unsigned long)(d.age_ms / 1000));
         text(ago, r.x + r.w - 24, r.y + 44, &fonts::FreeSans9pt7b, MUTED, top_right);
 
-        if (click && view.hit(cx, cy) && r.hit(cx, cy)) {
+        if ((click && view.hit(cx, cy) && r.hit(cx, cy)) || (int)idx == key_open) {
             canvas.clearClipRect();
             open_finder(d);
             opened = true;
@@ -954,8 +1092,9 @@ void screen_list() {
         canvas.fillRoundRect(W - 22, by, 8, bh - 8, 4, MUTED);
     }
     char pg[96];
-    snprintf(pg, sizeof pg, max_scroll > 0 ? "%d found  |  drag to scroll, tap one to find it"
-                                            : "%d found  |  tap one to find it", (int)s_list.size());
+    snprintf(pg, sizeof pg, kbd_present() ? "%d found  |  arrows and Enter to pick one, Tab for the next section"
+                            : max_scroll > 0 ? "%d found  |  drag to scroll, tap one to find it"
+                                             : "%d found  |  tap one to find it", (int)s_list.size());
     text(pg, W / 2, H - 30, &fonts::FreeSans12pt7b, MUTED, middle_center);
 }
 
@@ -988,6 +1127,7 @@ void beeper(const Reading &r, uint32_t t) {
 void draw_target_title(const Target &tg, const char *suffix) {
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
+    hot(back, K_ESC);
     if (tapped(back)) {
         if (s_screen == Screen::Sweep) s_screen = Screen::Finder;
         else { s_screen = Screen::List; target_clear(); }
@@ -1119,6 +1259,11 @@ void screen_finder() {
     } else {
         button(b_alarm, watched ? "Alarm: on" : "Alarm if lost", watched);
     }
+    hot(b_pin, 'p');
+    if (!is_wifi) hot(b_alarm, 'a');
+    hot(b_name, 'r');
+    hot(b_glow, 'c');
+    hot(sweep, 's');
     if (tapped(b_pin) || (!is_wifi && tapped(b_alarm))) {
         uint8_t bit = tapped(b_pin) ? kSavedPin : kSavedWatch;
         if (Saved *e = saved_get(s_target_view)) {
@@ -1318,7 +1463,7 @@ void screen_glow() {
          &fonts::FreeSansBold18pt7b, 0xFFFFFFu, middle_center);
     text("blue = far     red = close     tap anywhere to go back", W / 2, H - 50, &fonts::FreeSans12pt7b,
          0xFFFFFFu, middle_center);
-    if (s_tap) { s_screen = Screen::Finder; s_tap = false; }
+    if (s_tap || s_key) { s_screen = Screen::Finder; s_tap = false; s_key = 0; }
 }
 
 // ---------------------------------------------------------------- rename
@@ -1347,6 +1492,15 @@ void screen_rename() {
     static const char *kRows[] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
     const int kIndent[] = {0, 0, pitch / 2, pitch};
     size_t len = strlen(s_edit);
+    if (s_key >= 32 && s_key < 127) {                   // typed on the Tab5 Keyboard
+        if (len < sizeof s_edit - 1 && (len || s_key != ' ')) { s_edit[len++] = (char)s_key; s_edit[len] = 0; }
+        s_shift = false;
+        s_key = 0;
+    } else if (s_key == K_BS || s_key == K_DEL) {
+        if (len) s_edit[--len] = 0;
+        s_shift = len == 0;
+        s_key = 0;
+    }
     for (int row = 0; row < 4; ++row) {
         for (int i = 0; kRows[row][i]; ++i) {
             char c = kRows[row][i];
@@ -1379,7 +1533,9 @@ void screen_rename() {
         s_tap = false;
     }
     if (tapped(clear)) { s_edit[0] = 0; s_shift = true; s_tap = false; }
+    hot(cancel, K_ESC);
     if (tapped(cancel)) { s_screen = Screen::Finder; s_tap = false; }
+    hot(save, K_ENTER);
     if (tapped(save)) {
         while (len && s_edit[len - 1] == ' ') s_edit[--len] = 0;
         if (Saved *e = saved_get(s_target_view)) {
@@ -1397,6 +1553,7 @@ void screen_channels() {
     draw_header("Signal Finder & Analyzer");
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
+    hot(back, K_ESC);
     if (tapped(back)) { s_screen = Screen::Tools; s_tap = false; }
     text("Wi-Fi channels", 196, 100 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
     text_wrap("How many networks sit on each 2.4 GHz channel. Bar colour = the strongest one there.", 196,
@@ -1478,6 +1635,7 @@ void screen_tools() {
     draw_header("Signal Finder & Analyzer");
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
+    hot(back, K_ESC);
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
     if (!P) text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
@@ -1626,6 +1784,7 @@ void screen_clock() {
     Rect cancel{24, H - 100, 220, 76}, save{W - 244, H - 100, 220, 76};
     button(cancel, "Cancel");
     button(save, "Save", true);
+    hot(cancel, K_ESC);
     if (tapped(cancel)) { s_screen = Screen::Tools; s_tap = false; }
     if (tapped(save)) {
         clock_set(s_clk);
@@ -1639,6 +1798,7 @@ void screen_history() {
     draw_header("Signal Finder & Analyzer");
     Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
+    hot(back, K_ESC);
     if (tapped(back)) { s_screen = Screen::Tools; s_tap = false; }
     text("Alert history", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
@@ -1720,6 +1880,16 @@ void vol_input() {
     if (!s_vol_open) { s_vol_dirty = false; return; }
     Rect p = vol_panel();
     int tx0 = p.x + kVolTrackInset, tw = p.w - kVolTrackInset - kVolTrackRight;
+    if (s_key) {                                        // keyboard: Left/Right change it, Enter or Esc closes
+        if (s_key == K_LEFT || s_key == K_RIGHT) {
+            s_volume = (uint8_t)std::clamp((int)s_volume + (s_key == K_RIGHT ? 5 : -5), 0, 100);
+            apply_volume();
+            s_vol_dirty = true;
+        } else if (s_key == K_ESC || s_key == K_ENTER) {
+            s_vol_open = false;
+        }
+        s_key = 0;
+    }
     if (s_down && p.hit(s_cur_x, s_cur_y)) {
         int v = (s_cur_x - tx0) * 100 / tw;
         v = std::clamp(v, 0, 100);
@@ -1871,6 +2041,9 @@ void copy_input() {
     if (s_copy != 4) return;
     Rect p = copy_panel(), opt, go, cancel;
     copy_rects(p, opt, go, cancel);
+    hot(go, K_ENTER);
+    hot(cancel, K_ESC);
+    s_key = 0;
     if (s_copy_has_old && tapped(opt)) s_copy_delete = !s_copy_delete;
     else if (tapped(go)) s_copy = 1;
     else if (tapped(cancel)) s_copy = 0;
@@ -2008,7 +2181,7 @@ void ui_loop_once() {
     sdr_set_wanted(s_scan_on && ((s_screen == Screen::List && s_phone_section) || s_screen == Screen::Phone));
     sdr_set_focus(s_screen == Screen::Phone ? s_phone_band : -1);
     if (sdr_wants_power_cycle()) sdr_power_cycle();     // I2C belongs to this task
-    int ux = 0, uy = 0;
+    int ux = 0, uy = 0, usb_key = 0;
     switch (usb_command_take(&ux, &uy)) {               // requests from a PC over USB
     case UsbCommand::Tap:
         s_tap = true;
@@ -2019,6 +2192,9 @@ void ui_loop_once() {
         break;
     case UsbCommand::Flick:
         s_scroll_vel = ux;
+        break;
+    case UsbCommand::Key:
+        usb_key = ux;
         break;
     case UsbCommand::Screenshot:
         s_shot_wanted = true;
@@ -2033,6 +2209,45 @@ void ui_loop_once() {
         break;
     }
     default: break;
+    }
+
+    kbd_poll();
+    s_key = usb_key ? usb_key : kbd_take();
+    if (s_key) {
+        if (!locked) s_last_touch = now_ms();
+        if (s_dimmed || locked) s_key = 0;      // like a touch: it only wakes the screen
+    }
+    // Keyboard focus: work from the buttons the last frame drew.
+    memcpy(s_nav_prev, s_nav, sizeof(Rect) * s_nav_n);
+    s_nav_prev_n = s_nav_n;
+    s_nav_n = 0;
+    if (s_tap) s_foc_on = false;                // touch takes over
+    if (s_foc_on) {                             // the highlighted button may be gone (new screen)
+        bool there = false;
+        for (int i = 0; i < s_nav_prev_n; ++i) there = there || s_nav_prev[i].hit(s_foc_x, s_foc_y);
+        s_foc_on = there;
+    }
+    if (s_key >= K_UP && s_key <= K_RIGHT && !s_vol_open && s_copy == 0) {
+        const bool list = s_screen == Screen::List;
+        if (s_foc_on) {
+            if (nav_move(s_foc_x, s_foc_y, s_key)) s_key = 0;
+            else if (list && s_key == K_DOWN) s_foc_on = false;     // below the buttons: into the list
+            else s_key = 0;
+        } else if (!list) {                     // first arrow: start at the top-left button under the header
+            int best = -1;
+            for (int i = 0; i < s_nav_prev_n; ++i) {
+                const Rect &r = s_nav_prev[i];
+                if (r.y < 80 + Y0) continue;
+                if (best < 0 || r.y < s_nav_prev[best].y - 8 ||
+                    (abs(r.y - s_nav_prev[best].y) <= 8 && r.x < s_nav_prev[best].x)) best = i;
+            }
+            if (best >= 0) {
+                s_foc_x = s_nav_prev[best].x + s_nav_prev[best].w / 2;
+                s_foc_y = s_nav_prev[best].y + s_nav_prev[best].h / 2;
+                s_foc_on = true;
+            }
+            s_key = 0;
+        }
     }
 
     alerts_tick();

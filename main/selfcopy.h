@@ -24,10 +24,12 @@ size_t app_remove_old_copies();
 //   sdcopy     copy the app to the SD card
 //   sdclean    delete older copies of the app from the SD card
 //   tap X Y    act as if the screen was tapped at X, Y
+//   key N      act as if a key was pressed on the Tab5 Keyboard (N: character code,
+//              or 128-131 for up, down, left, right)
 //   flick N    set the device list gliding, N pixels a second (negative: back up)
 //   shot       send a half-size screenshot (rows of RGB565 hex between
 //              "SHOT name w h" and "ENDSHOT")
 // Requests are picked up by the UI task through usb_command_take().
 void usb_commands_start();
-enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Flick, Screenshot };
+enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Flick, Key, Screenshot };
 UsbCommand usb_command_take(int *x, int *y);

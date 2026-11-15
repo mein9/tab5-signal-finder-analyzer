@@ -22,6 +22,7 @@
 #include "errlog.h"
 #include "sdr.h"
 #include "selfcopy.h"
+#include "kbd.h"
 #include "ui.h"
 
 static const char *TAG = "finder";
@@ -160,6 +161,7 @@ extern "C" void app_main(void) {
 #endif
     sdr_start();
     usb_commands_start();
+    kbd_start();
     xTaskCreatePinnedToCore(log_task, "log", 4096, nullptr, 1, nullptr, 0);
 
     for (;;) {

@@ -11,10 +11,10 @@ if(EXISTS "${finder_root}/components/esp_rtl_sdr/CMakeLists.txt")
 endif()
 
 idf_component_register(
-    SRCS         "main.cpp" "ble_scan.cpp" "devices.cpp" "ui.cpp" "wifi_scan.cpp"
+    SRCS         "main.cpp" "kbd.cpp" "ble_scan.cpp" "devices.cpp" "ui.cpp" "wifi_scan.cpp"
                  "saved.cpp" "alerts.cpp" "sdlog.cpp" "clock.cpp" "sdr.cpp" "demo.cpp" "errlog.cpp" "selfcopy.cpp"
     INCLUDE_DIRS "."
-    REQUIRES     ${finder_sdr_requires} esp_driver_ppa esp_driver_spi esp_driver_sdspi fatfs sdmmc
+    REQUIRES     ${finder_sdr_requires} esp_driver_ppa esp_driver_gpio esp_driver_spi esp_driver_sdspi fatfs sdmmc
                  esp_hosted esp_wifi_remote esp_wifi esp_netif esp_event nvs_flash bt esp_timer app_update esp_partition espcoredump esp_app_format bootloader_support esp_driver_usb_serial_jtag
     # ESP-Hosted 3.0.6 co-processor firmware with Wi-Fi + Bluetooth for the C6
     # (Espressif's bleprph_wifi_coex/cp example, Apache-2.0). Installed on
