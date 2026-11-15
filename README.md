@@ -6,13 +6,25 @@ toward it: the signal number, meter, beeps and colour all get stronger as you
 get closer. Made for finding things like a dropped earbud, a tracker tag, or a
 hidden access point.
 
-| | |
-| --- | --- |
-| ![Device list](docs/screenshots/list.png) | ![Hot / cold finder](docs/screenshots/finder.png) |
-| ![Wi-Fi networks](docs/screenshots/wifi.png) | ![Phone bands](docs/screenshots/phone-bands.png) |
+| | | |
+| --- | --- | --- |
+| ![Device list](docs/screenshots/list.png) | ![Hot / cold finder](docs/screenshots/finder.png) | ![Sweep radar](docs/screenshots/sweep-radar.png) |
+| Device list | Hot / cold finder | Sweep radar |
+| ![Tracker alert, with a pinned and renamed device](docs/screenshots/tracker-alert.png) | ![Colour view](docs/screenshots/color-view.png) | ![Rename keyboard](docs/screenshots/rename.png) |
+| Tracker alert, with a pinned and renamed device | Colour view | Rename keyboard |
+| ![Wi-Fi networks](docs/screenshots/wifi.png) | ![Wi-Fi channel chart](docs/screenshots/channels.png) | ![Volume slider](docs/screenshots/volume.png) |
+| Wi-Fi networks | Wi-Fi channel chart | Volume slider |
+| ![Phone bands](docs/screenshots/phone-bands.png) | ![Following one phone band](docs/screenshots/phone-finder.png) | ![More screen](docs/screenshots/more.png) |
+| Phone bands | Following one phone band | More screen |
 
-More screenshots are in [docs/screenshots](docs/screenshots). They were taken in
-demo mode, so every device name, network name and address in them is made up.
+Portrait works too:
+
+| | | |
+| --- | --- | --- |
+| ![Device list, portrait](docs/screenshots/portrait-list.png) | ![Finder, portrait](docs/screenshots/portrait-finder.png) | ![Sweep radar, portrait](docs/screenshots/portrait-sweep-radar.png) |
+
+All screenshots were taken in demo mode, so every device name, network name,
+address and reading in them is made up.
 
 ## What it does
 
@@ -68,6 +80,7 @@ demo mode, so every device name, network name and address in them is made up.
   a touch.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
+- **Power off** - switches the Tab5 off from the More screen.
 
 ## Limits worth knowing
 

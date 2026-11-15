@@ -48,3 +48,6 @@ bool   alerts_watch_active();
 void   alerts_watch_start();
 void   alerts_watch_stop();
 size_t alerts_watch_known();        // how many devices count as normal
+
+// Demo mode only: shows a sample tracker alert.
+void alerts_demo_raise();

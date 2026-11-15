@@ -211,3 +211,14 @@ void alerts_watch_start() {
 }
 
 void alerts_watch_stop() { s_watch = false; }
+
+void alerts_demo_raise() {
+#if FINDER_DEMO
+    DeviceView d{};
+    d.kind = Kind::FindMy;
+    d.away = true;
+    snprintf(d.label, sizeof d.label, "Find My item");
+    raise(AlertType::Tracker, d, "A tracker may be travelling with you",
+          "Find My item has been near you for 14 minutes while you were moving.");
+#endif
+}

@@ -73,6 +73,7 @@ DeviceView s_target_view{};             // the device being tracked, as tapped
 float    s_motion_s = 0;                // seconds the Tab5 has been moving
 float    s_activity = 0;
 bool     s_forget_confirm = false;
+bool     s_off_confirm = false;          // "Power off" tapped once
 char     s_edit[24] = {0};              // nickname being typed
 bool     s_shift = true;
 uint8_t  s_rotation = 3;
@@ -467,7 +468,7 @@ void draw_header(const char *title) {
     if (tapped(vol)) { s_vol_open = !s_vol_open; s_tap = false; }
     if (tapped(more)) {
         if (s_screen == Screen::Tools) s_screen = s_tools_back;
-        else { s_tools_back = s_screen; s_screen = Screen::Tools; s_forget_confirm = false; }
+        else { s_tools_back = s_screen; s_screen = Screen::Tools; s_forget_confirm = false; s_off_confirm = false; }
         s_tap = false;
     }
 }
@@ -1323,6 +1324,25 @@ void screen_tools() {
     button(back, "< Back");
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
     text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+
+    // Power off, top right. Two taps, so a stray touch can't switch the Tab5 off.
+    Rect off{W - 264, 92 + Y0, 240, 56};
+    button(off, s_off_confirm ? "Tap to confirm" : "Power off", s_off_confirm);
+    if (tapped(off)) {
+        s_tap = false;
+        if (!s_off_confirm) {
+            s_off_confirm = true;
+        } else {
+            sdlog_stop();                   // finish the log file cleanly
+            save_settings();
+            M5.Display.setBrightness(0);
+            M5.Power.powerOff();            // does not return if it worked
+            M5.Display.setBrightness(s_brightness);
+            s_off_confirm = false;
+        }
+    } else if (s_tap) {
+        s_off_confirm = false;              // any other tap cancels
+    }
 
     char d[160];
     if (tool_row(0, "Tracker alert", "Warns if an AirTag, Tile or SmartTag stays with you for 10+ minutes while moving.",
