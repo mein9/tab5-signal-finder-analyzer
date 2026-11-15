@@ -6,6 +6,10 @@ toward it: the signal number, meter, beeps and colour all get stronger as you
 get closer. Made for finding things like a dropped earbud, a tracker tag, or a
 hidden access point.
 
+**Works with the [M5Launcher](https://github.com/bmorcelli/Launcher):** install
+it from the SD card, launch it from the Launcher, and the Launcher still comes
+up first at every power-on.
+
 | | | |
 | --- | --- | --- |
 | ![Device list](docs/screenshots/list.png) | ![Hot / cold finder](docs/screenshots/finder.png) | ![Sweep radar](docs/screenshots/sweep-radar.png) |
@@ -134,6 +138,8 @@ python -m esptool --chip esp32p4 write_flash 0x2000 build/bootloader/bootloader.
 ```
 
 The app needs about 2.7 MB, so the Launcher app slot must be at least that big.
+Tested with the Launcher on a Tab5: installing from the SD card, launching
+from the Launcher's app list, and returning to the Launcher at power-on.
 
 Under the Launcher, a power-on shows the Launcher first, as it should. Two
 quirks are handled for that:
