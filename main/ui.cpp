@@ -40,6 +40,10 @@ constexpr uint32_t BAD       = 0xFF5A5Au;
 
 M5Canvas canvas;
 int W = 1280, H = 720;
+bool P = false;            // portrait (tall) layout
+int  Y0 = 0;               // extra header height in portrait; screens start this much lower
+bool s_rotate_pending = false;
+uint8_t s_canvas_rot = 3;  // rotation the canvas is currently laid out for
 
 enum class Screen { List, Finder, Sweep, Glow, Rename, Tools, Channels };
 Screen   s_screen = Screen::List;
@@ -97,6 +101,32 @@ void text(const char *s, int x, int y, const lgfx::IFont *font, uint32_t color,
     canvas.setTextColor(color);
     canvas.setTextDatum(datum);
     canvas.drawString(s, x, y);
+}
+
+// Draws text wrapped to `maxw` pixels. Returns the y below the last line.
+int text_wrap(const char *s, int x, int y, int maxw, const lgfx::IFont *font, uint32_t color, int line_h) {
+    canvas.setFont(font);
+    canvas.setTextSize(1.0f);
+    canvas.setTextColor(color);
+    canvas.setTextDatum(top_left);
+    char line[240] = "", trial[240];
+    const char *p = s;
+    while (*p) {
+        const char *e = p;
+        while (*e && *e != ' ') ++e;
+        snprintf(trial, sizeof trial, "%s%s%.*s", line, line[0] ? " " : "", (int)(e - p), p);
+        if (line[0] && canvas.textWidth(trial) > maxw) {
+            canvas.drawString(line, x, y);
+            y += line_h;
+            snprintf(line, sizeof line, "%.*s", (int)(e - p), p);
+        } else {
+            memcpy(line, trial, sizeof line);
+        }
+        p = e;
+        while (*p == ' ') ++p;
+    }
+    if (line[0]) { canvas.drawString(line, x, y); y += line_h; }
+    return y;
 }
 
 void button(const Rect &r, const char *label, bool on = false) {
@@ -164,19 +194,22 @@ void load_settings() {
     nvs_handle_t h;
     if (nvs_open("blefind", NVS_READONLY, &h) != ESP_OK) return;
     uint8_t v;
-    if (nvs_get_u8(h, "rot", &v) == ESP_OK && (v == 1 || v == 3)) s_rotation = v;
+    if (nvs_get_u8(h, "rot", &v) == ESP_OK && v <= 3) s_rotation = v;
     if (nvs_get_u8(h, "volp", &v) == ESP_OK && v <= 100) s_volume = v;
-    else if (nvs_get_u8(h, "snd", &v) == ESP_OK && !v) s_volume = 0;      // older on/off setting
+    else if (nvs_get_u8(h, "vol", &v) == ESP_OK && v <= 3) {              // older 4-step setting
+        static const uint8_t kStep[] = {0, 25, 55, 100};
+        s_volume = kStep[v];
+    } else if (nvs_get_u8(h, "snd", &v) == ESP_OK && !v) s_volume = 0;    // oldest on/off setting
     nvs_close(h);
 }
 
 // The panel is natively portrait (720x1280) but the app is landscape, and its
 // frame buffer lives in slow external RAM. Letting the graphics library rotate
 // each frame in software took ~650 ms. Instead:
-//  - frames are drawn in landscape into one of two buffers,
+//  - frames are drawn the way the user holds the Tab5 into one of two buffers,
 //  - a background task hands the finished buffer to the P4's PPA hardware,
-//    which rotates it straight into the display's frame buffer and then
-//    clears it to the background colour ready for reuse,
+//    which rotates it (0/90/180/270 degrees) straight into the display's
+//    frame buffer and then clears it to the background colour for reuse,
 //  - meanwhile the next frame is already being drawn into the other buffer.
 // If the hardware path is not available, fall back to the slow software path.
 int s_panel_w = 720, s_panel_h = 1280;
@@ -185,24 +218,30 @@ uint16_t *s_fb = nullptr;
 bool s_hw_push = false;
 void *s_buf[2] = {nullptr, nullptr};
 uint8_t s_cur = 0;
+
+// A finished frame on its way to the screen.
+struct Frame { uint8_t idx, rot; uint16_t w, h; };
 QueueHandle_t s_q_present = nullptr, s_q_free = nullptr;
 
-bool hw_rotate(void *src) {
+bool hw_rotate(void *src, int w, int h, uint8_t rot) {
     ppa_srm_oper_config_t op;
     memset(&op, 0, sizeof op);
     op.in.buffer = src;
-    op.in.pic_w = W;
-    op.in.pic_h = H;
-    op.in.block_w = W;
-    op.in.block_h = H;
+    op.in.pic_w = w;
+    op.in.pic_h = h;
+    op.in.block_w = w;
+    op.in.block_h = h;
     op.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
     op.out.buffer = s_fb;
     op.out.buffer_size = (uint32_t)s_panel_w * s_panel_h * 2;
     op.out.pic_w = s_panel_w;
     op.out.pic_h = s_panel_h;
     op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
-    // Display rotation 1 turns the picture clockwise onto the panel, 3 counter-clockwise.
-    op.rotation_angle = s_rotation == 1 ? PPA_SRM_ROTATION_ANGLE_270 : PPA_SRM_ROTATION_ANGLE_90;
+    // Display rotation 1 turns the picture clockwise onto the panel, 3
+    // counter-clockwise; 0 and 2 are the panel's own portrait, upright and flipped.
+    static const ppa_srm_rotation_angle_t kAngle[] = {PPA_SRM_ROTATION_ANGLE_0, PPA_SRM_ROTATION_ANGLE_270,
+                                                      PPA_SRM_ROTATION_ANGLE_180, PPA_SRM_ROTATION_ANGLE_90};
+    op.rotation_angle = kAngle[rot & 3];
     op.scale_x = 1.0f;
     op.scale_y = 1.0f;
     op.mode = PPA_TRANS_MODE_BLOCKING;
@@ -229,12 +268,12 @@ bool hw_clear(void *dst) {
 }
 
 void presenter_task(void *) {
-    uint8_t i;
+    Frame f;
     for (;;) {
-        xQueueReceive(s_q_present, &i, portMAX_DELAY);
-        hw_rotate(s_buf[i]);
-        if (!hw_clear(s_buf[i])) memset(s_buf[i], 0, (size_t)W * H * 2);
-        xQueueSend(s_q_free, &i, portMAX_DELAY);
+        xQueueReceive(s_q_present, &f, portMAX_DELAY);
+        hw_rotate(s_buf[f.idx], f.w, f.h, f.rot);
+        if (!hw_clear(s_buf[f.idx])) memset(s_buf[f.idx], 0, (size_t)f.w * f.h * 2);
+        xQueueSend(s_q_free, &f.idx, portMAX_DELAY);
     }
 }
 
@@ -244,11 +283,15 @@ bool check_hw_push() {
     canvas.fillScreen(0);
     canvas.drawPixel(0, 0, (uint16_t)0xF800);
     canvas.drawPixel(W - 1, 0, (uint16_t)0x07E0);
-    if (!hw_rotate(s_buf[0])) return false;
+    if (!hw_rotate(s_buf[0], W, H, s_rotation)) return false;
     auto at = [](int x, int y) -> uint16_t {
         int px, py;
-        if (s_rotation == 1) { px = s_panel_w - 1 - y; py = x; }
-        else                 { px = y; py = s_panel_h - 1 - x; }
+        switch (s_rotation) {
+        case 0:  px = x; py = y; break;
+        case 1:  px = s_panel_w - 1 - y; py = x; break;
+        case 2:  px = s_panel_w - 1 - x; py = s_panel_h - 1 - y; break;
+        default: px = y; py = s_panel_h - 1 - x; break;
+        }
         return s_fb[py * s_panel_w + px];
     };
     uint16_t a = at(0, 0), b = at(W - 1, 0);
@@ -266,7 +309,13 @@ void make_canvas() {
     M5.Display.setRotation(s_rotation);   // also sets touch coordinates
     W = M5.Display.width();
     H = M5.Display.height();
-    if (s_hw_push) return;                // only the rotation changed; buffers stay
+    P = H > W;
+    Y0 = P ? 72 : 0;
+    s_canvas_rot = s_rotation;
+    if (s_hw_push) {                      // only the rotation changed; buffers stay
+        canvas.setBuffer(s_buf[s_cur], W, H);
+        return;
+    }
 
     canvas.setColorDepth(lgfx::color_depth_t::rgb565_nonswapped);   // the panel's own format
     if (!s_ppa) {
@@ -287,7 +336,7 @@ void make_canvas() {
         }
     }
     if (s_hw_push) {
-        s_q_present = xQueueCreate(1, 1);
+        s_q_present = xQueueCreate(1, sizeof(Frame));
         s_q_free = xQueueCreate(2, 1);
         uint8_t one = 1;
         xQueueSend(s_q_free, &one, 0);
@@ -310,7 +359,8 @@ void begin_frame() {
 // Shows the frame just drawn.
 void push_frame() {
     if (!s_hw_push) { canvas.pushSprite(&M5.Display, 0, 0); return; }
-    xQueueSend(s_q_present, &s_cur, portMAX_DELAY);
+    Frame f{s_cur, s_canvas_rot, (uint16_t)W, (uint16_t)H};
+    xQueueSend(s_q_present, &f, portMAX_DELAY);
     xQueueReceive(s_q_free, &s_cur, portMAX_DELAY);   // the other buffer, shown and cleared
     canvas.setBuffer(s_buf[s_cur], W, H);
 }
@@ -327,9 +377,22 @@ void poll_touch() {
 }
 
 // ---------------------------------------------------------------- header
+// Landscape: buttons sit at the right of the title row. Portrait: on a second row.
+void header_buttons(Rect &scan, Rect &vol, Rect &more) {
+    if (P) {
+        scan = Rect{24, 84, 216, 52};
+        vol = Rect{252, 84, 216, 52};
+        more = Rect{480, 84, 216, 52};
+    } else {
+        scan = Rect{W - 506, 12, 170, 52};
+        vol = Rect{W - 326, 12, 170, 52};
+        more = Rect{W - 146, 12, 126, 52};
+    }
+}
+
 void draw_header(const char *title) {
-    canvas.fillRect(0, 0, W, 76, PANEL);
-    canvas.drawFastHLine(0, 76, W, LINE);
+    canvas.fillRect(0, 0, W, 76 + Y0, PANEL);
+    canvas.drawFastHLine(0, 76 + Y0, W, LINE);
     text(title, 24, 38, &fonts::FreeSansBold12pt7b, TEXT, middle_left);
 
     BleState st = ble_state();
@@ -345,7 +408,7 @@ void draw_header(const char *title) {
         snprintf(status, sizeof status, "%s (%d)", ble_state_text(), ble_error());
     else
         snprintf(status, sizeof status, "%s...", ble_state_text());
-    int sx = 372;
+    int sx = P ? 330 : 372;
     canvas.fillCircle(sx, 38, 9, dot);
     text(status, sx + 20, 38, &fonts::FreeSans12pt7b, MUTED, middle_left);
 
@@ -355,10 +418,11 @@ void draw_header(const char *title) {
     if (bat >= 0) {
         char b[16];
         snprintf(b, sizeof b, "%d%%", bat);
-        text(b, W - 524, 38, &fonts::FreeSans12pt7b, MUTED, middle_right);
+        text(b, P ? W - 24 : W - 524, 38, &fonts::FreeSans12pt7b, MUTED, middle_right);
     }
 
-    Rect scan{W - 506, 12, 170, 52}, vol{W - 326, 12, 170, 52}, more{W - 146, 12, 126, 52};
+    Rect scan, vol, more;
+    header_buttons(scan, vol, more);
     button(scan, s_scan_on ? "Scan: on" : "Scan: off", s_scan_on);
     char vl[24];
     if (s_volume) snprintf(vl, sizeof vl, "Sound %d%%", (int)s_volume);
@@ -382,24 +446,21 @@ void draw_header(const char *title) {
 bool s_confirm = false;
 
 void radio_update_panel() {
-    int x = 60, y = 110, w = W - 120;
+    int x = P ? 24 : 60, y = 110 + Y0, w = W - 2 * x;
     RadioUpdate st = radio_update_state();
     canvas.fillRoundRect(x, y, w, H - y - 40, 18, PANEL);
     int tx = x + 40, ty = y + 40;
 
     if (st == RadioUpdate::Idle) {
-        text("Bluetooth is switched off in the radio chip", tx, ty, &fonts::FreeSansBold18pt7b, WARN);
-        const char *lines[] = {
-            "The Tab5's ESP32-C6 radio chip is running a Wi-Fi-only firmware (installed by OrcSDR),",
-            "so it can't scan for Bluetooth devices.",
-            "",
-            "This app can install the same ESP-Hosted version (3.0.6) with Wi-Fi AND Bluetooth.",
-            "It takes about a minute. The new firmware is written to a spare slot and only used once",
-            "it arrives complete; if the transfer fails, the radio chip keeps its current firmware.",
-            "Don't turn the Tab5 off while it runs. OrcSDR may switch it back to its own version later.",
-        };
-        for (int i = 0; i < 7; ++i)
-            text(lines[i], tx, ty + 70 + i * 36, &fonts::FreeSans12pt7b, i == 0 || i == 1 ? TEXT : MUTED);
+        int yy = text_wrap("Bluetooth is switched off in the radio chip", tx, ty, w - 80,
+                           &fonts::FreeSansBold18pt7b, WARN, 44);
+        yy = text_wrap("The Tab5's ESP32-C6 radio chip is running a Wi-Fi-only firmware, so it can't scan "
+                       "for Bluetooth devices.", tx, yy + 20, w - 80, &fonts::FreeSans12pt7b, TEXT, 34);
+        text_wrap("This app can install the same ESP-Hosted version (3.0.6) with Wi-Fi AND Bluetooth. It takes "
+                  "about a minute. The new firmware is written to a spare slot and only used once it arrives "
+                  "complete; if the transfer fails, the radio chip keeps its current firmware. Don't turn the "
+                  "Tab5 off while it runs. Other apps may switch it back to their own version later.",
+                  tx, yy + 16, w - 80, &fonts::FreeSans12pt7b, MUTED, 34);
         Rect go{tx, H - 170, 520, 80};
         button(go, s_confirm ? "Tap again to confirm" : "Install Wi-Fi + Bluetooth firmware", s_confirm);
         if (tapped(go)) {
@@ -408,7 +469,7 @@ void radio_update_panel() {
             s_tap = false;
         }
         if (s_confirm) {
-            Rect no{tx + 560, H - 170, 220, 80};
+            Rect no = P ? Rect{tx, H - 270, 220, 80} : Rect{tx + 560, H - 170, 220, 80};
             button(no, "Cancel");
             if (tapped(no)) { s_confirm = false; s_tap = false; }
         }
@@ -457,18 +518,18 @@ void screen_list() {
     }
 
     // Section switch: Bluetooth | Wi-Fi
-    Rect bt{24, 92, 200, 56}, wf{232, 92, 200, 56};
+    Rect bt{24, 92 + Y0, 200, 56}, wf{232, 92 + Y0, 200, 56};
     button(bt, "Bluetooth", !s_wifi_section);
     button(wf, "Wi-Fi", s_wifi_section);
     if (tapped(bt)) { s_wifi_section = false; s_page = 0; s_tap = false; }
     if (tapped(wf)) { s_wifi_section = true; s_page = 0; s_tap = false; }
-    canvas.drawFastVLine(452, 96, 48, LINE);
+    if (!P) canvas.drawFastVLine(452, 96, 48, LINE);
 
     if (!s_wifi_section) {
-        const char *names[] = {"Trackers & earbuds", "Named", "Everything"};
+        const char *names[] = {P ? "Trackers" : "Trackers & earbuds", "Named", "Everything"};
         const Filter vals[] = {Filter::Findable, Filter::Named, Filter::All};
         for (int i = 0; i < 3; ++i) {
-            Rect r{472 + i * 264, 92, 252, 56};
+            Rect r = P ? Rect{24 + i * 228, 156 + Y0, 216, 56} : Rect{472 + i * 264, 92, 252, 56};
             button(r, names[i], s_filter == vals[i]);
             if (tapped(r)) { s_filter = vals[i]; s_page = 0; s_tap = false; }
         }
@@ -481,7 +542,7 @@ void screen_list() {
             snprintf(ws, sizeof ws, "Wi-Fi didn't start on the radio chip (error %d)", wifi_error());
         else
             snprintf(ws, sizeof ws, "%s...", wifi_state_text());
-        text(ws, 476, 120, &fonts::FreeSans12pt7b,
+        text(ws, P ? 24 : 476, P ? 184 + Y0 : 120, &fonts::FreeSans12pt7b,
              wifi_state() == WifiState::Failed ? BAD : MUTED, middle_left);
     }
 
@@ -493,22 +554,21 @@ void screen_list() {
         return sv && (sv->flags & kSavedPin);
     });
 
-    const int top = 164, row_h = 80, foot = 80;
+    const int top = 164 + Y0 + (P ? 64 : 0), row_h = 80, foot = 80;
     const int rows = std::max(1, (H - top - foot) / row_h);
     const int pages = std::max(1, (int)((s_list.size() + rows - 1) / rows));
     s_page = std::min(s_page, pages - 1);
 
-    if (s_list.empty() && s_wifi_section) {
-        text(wifi_state() == WifiState::Failed ? "Wi-Fi scanning isn't available."
-                                               : "Looking for Wi-Fi networks...",
-             W / 2, top + 120, &fonts::FreeSans12pt7b, MUTED, middle_center);
-    } else if (s_list.empty()) {
-        const char *msg = ble_state() != BleState::Scanning
-                              ? "Waiting for Bluetooth to start..."
-                              : s_filter == Filter::Findable
-                                    ? "No trackers or earbuds heard yet. Open the AirPods case, or try Everything."
-                                    : "Nothing heard yet.";
-        text(msg, W / 2, top + 120, &fonts::FreeSans12pt7b, MUTED, middle_center);
+    if (s_list.empty()) {
+        const char *msg;
+        if (!s_scan_on) msg = "Scanning is off. Tap Scan to start.";
+        else if (s_wifi_section)
+            msg = wifi_state() == WifiState::Failed ? "Wi-Fi scanning isn't available." : "Looking for Wi-Fi networks...";
+        else if (ble_state() != BleState::Scanning) msg = "Waiting for Bluetooth to start...";
+        else if (s_filter == Filter::Findable)
+            msg = "No trackers or earbuds heard yet. Open the AirPods case, or try Everything.";
+        else msg = "Nothing heard yet.";
+        text_wrap(msg, 48, top + 100, W - 96, &fonts::FreeSans12pt7b, MUTED, 34);
     }
 
     for (int i = 0; i < rows; ++i) {
@@ -520,6 +580,7 @@ void screen_list() {
         signal_bars(r.x + 20, r.y + 16, d.rssi);
         Saved *sv = saved_find(d);
         const char *label = sv && sv->name[0] ? sv->name : d.label;
+        canvas.setClipRect(r.x + 100, r.y, r.w - 100 - 150, r.h);   // keep long text off the reading
         text(label, r.x + 100, r.y + 10, &fonts::FreeSansBold12pt7b, TEXT);
         int tagx = r.x + 100 + canvas.textWidth(label, &fonts::FreeSansBold12pt7b) + 18;
         if (sv && (sv->flags & kSavedPin)) {
@@ -531,6 +592,7 @@ void screen_list() {
         if (sv && sv->name[0]) snprintf(det, sizeof det, "%s  |  %s", d.label, d.detail);
         else snprintf(det, sizeof det, "%s", d.detail);
         text(det, r.x + 100, r.y + 42, &fonts::FreeSans9pt7b, MUTED);
+        canvas.clearClipRect();
         char rs[32];
         snprintf(rs, sizeof rs, "%.0f dBm", d.rssi);
         text(rs, r.x + r.w - 24, r.y + 12, &fonts::FreeSansBold12pt7b, strength_color(d.rssi),
@@ -547,7 +609,7 @@ void screen_list() {
 
     Rect prev{24, H - 70, 200, 56}, next{W - 224, H - 70, 200, 56};
     char pg[96];
-    snprintf(pg, sizeof pg, "Page %d of %d  |  tap a device to find it", s_page + 1, pages);
+    snprintf(pg, sizeof pg, P ? "Page %d of %d" : "Page %d of %d  |  tap a device to find it", s_page + 1, pages);
     text(pg, W / 2, H - 42, &fonts::FreeSans12pt7b, MUTED, middle_center);
     if (s_page > 0) { button(prev, "< Prev"); if (tapped(prev)) { --s_page; s_tap = false; } }
     if (s_page < pages - 1) { button(next, "Next >"); if (tapped(next)) { ++s_page; s_tap = false; } }
@@ -580,7 +642,7 @@ void beeper(const Reading &r, uint32_t t) {
 }
 
 void draw_target_title(const Target &tg, const char *suffix) {
-    Rect back{24, 92, 150, 56};
+    Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
     if (tapped(back)) {
         if (s_screen == Screen::Sweep) s_screen = Screen::Finder;
@@ -589,16 +651,18 @@ void draw_target_title(const Target &tg, const char *suffix) {
     }
     char t[96];
     snprintf(t, sizeof t, "%s%s", tg.label, suffix);
-    text(t, 196, 100, &fonts::FreeSansBold18pt7b, TEXT);
+    canvas.setClipRect(196, 92 + Y0, W - 196 - 16, 70);
+    text(t, 196, 100 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
     char sub[96];
     if (tg.wifi_channel)
         snprintf(sub, sizeof sub, "Wi-Fi network on channel %u - updates a few times a second",
                  (unsigned)tg.wifi_channel);
     else
         snprintf(sub, sizeof sub, "%s",
-                 tg.by_sig ? "Following every device of this type - its address changes every few minutes"
+                 tg.by_sig ? "Following this type of device - its address keeps changing"
                            : "Following this exact device");
-    text(sub, 196, 136, &fonts::FreeSans9pt7b, MUTED);
+    text(sub, 196, 136 + Y0, &fonts::FreeSans9pt7b, MUTED);
+    canvas.clearClipRect();
 }
 
 // ---------------------------------------------------------------- finder
@@ -609,7 +673,7 @@ void screen_finder() {
     Reading r = read_target(t);
     draw_target_title(tg, "");
 
-    int y0 = 176;
+    int y0 = 176 + Y0;
     bool lost = isnan(r.now);
     uint32_t since = r.last_ms ? (t - r.last_ms) / 1000 : 0;
 
@@ -619,8 +683,9 @@ void screen_finder() {
     else snprintf(big, sizeof big, "%.0f", r.now);
     uint32_t col = lost ? MUTED : strength_color(r.now);
     text(big, 60, y0, &fonts::FreeSansBold24pt7b, col, top_left, 3.0f);
-    text("dBm", 60 + canvas.textWidth(big, &fonts::FreeSansBold24pt7b) * 3 + 16, y0 + 20,
-         &fonts::FreeSans18pt7b, MUTED);
+    canvas.setTextSize(3.0f);
+    int big_w = canvas.textWidth(big, &fonts::FreeSansBold24pt7b);
+    text("dBm", 60 + big_w + 16, y0 + 20, &fonts::FreeSans18pt7b, MUTED);
 
     const char *line1, *line2 = "";
     char lostmsg[96];
@@ -640,22 +705,23 @@ void screen_finder() {
             line2 = d >= 3 ? "Getting warmer" : d <= -3 ? "Getting colder" : "About the same";
         }
     }
-    int tx = W / 2 + 20;
-    text(line1, tx, y0 + 14, &fonts::FreeSansBold18pt7b, TEXT);
+    // The description sits beside the number in landscape, under it in portrait.
+    int tx = P ? 60 : W / 2 + 20, ty = P ? y0 + 170 : y0;
+    text(line1, tx, ty + 14, &fonts::FreeSansBold18pt7b, TEXT);
     if (!lost && !isnan(r.before)) {
         float d = r.now - r.before;
         uint32_t c = d >= 3 ? GOOD : d <= -3 ? BAD : MUTED;
-        int ax = tx + 14, ay = y0 + 92;
+        int ax = tx + 14, ay = ty + 92;
         if (d >= 3) canvas.fillTriangle(ax - 14, ay + 10, ax + 14, ay + 10, ax, ay - 14, c);
         else if (d <= -3) canvas.fillTriangle(ax - 14, ay - 10, ax + 14, ay - 10, ax, ay + 14, c);
         else canvas.fillRect(ax - 14, ay - 4, 28, 8, c);
         text(line2, tx + 44, ay, &fonts::FreeSansBold12pt7b, c, middle_left);
     } else {
-        text(line2, tx, y0 + 80, &fonts::FreeSans12pt7b, MUTED);
+        text_wrap(line2, tx, ty + 66, W - tx - 40, &fonts::FreeSans12pt7b, MUTED, 30);
     }
 
     // Meter: -100 .. -30 dBm.
-    int my = y0 + 170, mx = 60, mw = W - 120, mh = 46;
+    int my = P ? ty + 150 : y0 + 170, mx = 60, mw = W - 120, mh = 46;
     canvas.fillRoundRect(mx, my, mw, mh, 12, PANEL);
     if (!lost) {
         float k = std::clamp((r.now + 100.0f) / 70.0f, 0.0f, 1.0f);
@@ -669,7 +735,7 @@ void screen_finder() {
     text("hot", mx + mw, my + mh + 8, &fonts::FreeSans9pt7b, MUTED, top_right);
 
     // Graph of the last 30 s.
-    int gy = my + mh + 44, gh = H - gy - 96, gx = mx, gw = mw;
+    int gy = my + mh + 44, gh = H - gy - (P ? 172 : 96), gx = mx, gw = mw;
     canvas.fillRoundRect(gx, gy, gw, gh, 12, PANEL);
     for (int db = -90; db <= -40; db += 10) {
         int yy = gy + gh - (int)((db + 100) * gh / 70.0f);
@@ -692,17 +758,20 @@ void screen_finder() {
     bool pinned = sv && (sv->flags & kSavedPin);
     bool watched = sv && (sv->flags & kSavedWatch);
     bool is_wifi = tg.wifi_channel != 0;
-    const int bw = 236, bgap = 13, by = H - 76;
-    Rect b_pin{24, by, bw, 60}, b_name{24 + (bw + bgap), by, bw, 60},
-         b_alarm{24 + 2 * (bw + bgap), by, bw, 60}, b_glow{24 + 3 * (bw + bgap), by, bw, 60},
-         sweep{24 + 4 * (bw + bgap), by, bw, 60};
+    // One row of five in landscape; three over two in portrait.
+    const int bw = P ? 216 : 236, bgap = P ? 12 : 13, by = H - 76;
+    auto slot = [&](int i) {
+        return P ? Rect{24 + (i % 3) * (bw + bgap), i < 3 ? by - 74 : by, bw, 60}
+                 : Rect{24 + i * (bw + bgap), by, bw, 60};
+    };
+    Rect b_pin = slot(0), b_name = slot(1), b_alarm = slot(2), b_glow = slot(3), sweep = slot(4);
     button(b_pin, pinned ? "Unpin" : "Pin to top", pinned);
     button(b_name, "Rename");
     button(b_glow, "Color view");
     button(sweep, "Sweep radar");
     if (is_wifi) {
         canvas.drawRoundRect(b_alarm.x, b_alarm.y, b_alarm.w, b_alarm.h, 14, LINE);
-        text("Alarm: Bluetooth only", b_alarm.x + bw / 2, by + 30, &fonts::FreeSans9pt7b, MUTED, middle_center);
+        text("Alarm: Bluetooth only", b_alarm.x + bw / 2, b_alarm.y + 30, &fonts::FreeSans9pt7b, MUTED, middle_center);
     } else {
         button(b_alarm, watched ? "Alarm: on" : "Alarm if lost", watched);
     }
@@ -784,7 +853,7 @@ void screen_sweep() {
     Target tg = target_get();
     uint32_t t = now_ms();
     Reading r = read_target(t);
-    draw_target_title(tg, "  -  sweep radar");
+    draw_target_title(tg, P ? "" : "  -  sweep radar");
 
     if (!M5.Imu.isEnabled()) {
         text("The motion sensor isn't available, so the sweep can't track direction.",
@@ -810,7 +879,9 @@ void screen_sweep() {
         if (filled == 1 || s_bin[i] < lo) lo = s_bin[i];
     }
 
-    int cx = 420, cy = 180 + (H - 180) / 2 - 10, R = std::min(300, (H - 220) / 2);
+    // Dial on the left with text beside it in landscape; dial on top, text under it in portrait.
+    int R = P ? 250 : std::min(300, (H - 220) / 2);
+    int cx = P ? W / 2 : 420, cy = P ? 250 + Y0 + R : 180 + (H - 180) / 2 - 10;
     canvas.fillCircle(cx, cy, R + 6, PANEL);
     // Wedges, drawn so the direction you face is always at the top.
     for (int i = 0; i < kBins; ++i) {
@@ -831,19 +902,20 @@ void screen_sweep() {
     canvas.fillTriangle(cx - 22, cy - R - 26, cx + 22, cy - R - 26, cx, cy - R + 4, TEXT);
     text("facing", cx, cy - R - 32, &fonts::FreeSans9pt7b, MUTED, bottom_center);
 
-    int px = cx + R + 70;
+    int px = P ? 40 : cx + R + 70;
+    const int pb = P ? cy + R + 30 - 190 : 0;     // moves the text block down in portrait
     char line[96];
     if (s_calibrating) {
-        text("Hold still...", px, 200, &fonts::FreeSansBold18pt7b, WARN);
-        text("Measuring the motion sensor.", px, 250, &fonts::FreeSans12pt7b, MUTED);
+        text("Hold still...", px, 200 + pb, &fonts::FreeSansBold18pt7b, WARN);
+        text("Measuring the motion sensor.", px, 250 + pb, &fonts::FreeSans12pt7b, MUTED);
     } else {
-        text("Turn slowly in a full circle", px, 190, &fonts::FreeSansBold18pt7b, TEXT);
-        text("Hold the Tab5 in front of your chest. Your body", px, 236, &fonts::FreeSans12pt7b, MUTED);
-        text("blocks signal from behind, so it reads strongest", px, 266, &fonts::FreeSans12pt7b, MUTED);
-        text("when you face the device.", px, 296, &fonts::FreeSans12pt7b, MUTED);
+        text("Turn slowly in a full circle", px, 190 + pb, &fonts::FreeSansBold18pt7b, TEXT);
+        text("Hold the Tab5 in front of your chest. Your body", px, 236 + pb, &fonts::FreeSans12pt7b, MUTED);
+        text("blocks signal from behind, so it reads strongest", px, 266 + pb, &fonts::FreeSans12pt7b, MUTED);
+        text("when you face the device.", px, 296 + pb, &fonts::FreeSans12pt7b, MUTED);
 
         snprintf(line, sizeof line, "Circle covered: %d%%", filled * 100 / kBins);
-        text(line, px, 350, &fonts::FreeSansBold12pt7b, filled == kBins ? GOOD : TEXT);
+        text(line, px, 350 + pb, &fonts::FreeSansBold12pt7b, filled == kBins ? GOOD : TEXT);
 
         if (best >= 0 && filled >= 6) {
             float rel = best * 10.0f + 5.0f - s_heading;
@@ -852,24 +924,24 @@ void screen_sweep() {
             if (fabsf(rel) <= 15) snprintf(line, sizeof line, "Strongest: straight ahead");
             else snprintf(line, sizeof line, "Strongest: %.0f deg to your %s", fabsf(rel),
                           rel > 0 ? "right" : "left");
-            text(line, px, 400, &fonts::FreeSansBold18pt7b, GOOD);
+            text(line, px, 400 + pb, &fonts::FreeSansBold18pt7b, GOOD);
             // Arrow from the centre toward the strongest bin.
             float a = (rel - 90.0f) * (float)M_PI / 180.0f;
             int ex = cx + (int)(cosf(a) * (R - 10)), ey = cy + (int)(sinf(a) * (R - 10));
             canvas.drawWideLine(cx, cy, ex, ey, 7, TEXT);
             canvas.fillCircle(ex, ey, 14, TEXT);
             snprintf(line, sizeof line, "best %.0f dBm, weakest %.0f dBm", hi, lo);
-            text(line, px, 446, &fonts::FreeSans12pt7b, MUTED);
+            text(line, px, 446 + pb, &fonts::FreeSans12pt7b, MUTED);
             if (hi - lo < 6)
-                text("Small difference - try again more slowly, or move.", px, 476,
+                text("Small difference - try again more slowly, or move.", px, 476 + pb,
                      &fonts::FreeSans12pt7b, WARN);
         }
         snprintf(line, sizeof line, "Now: %s", isnan(cur) ? "no signal" : "");
         if (!isnan(cur)) snprintf(line, sizeof line, "Now: %.0f dBm", cur);
-        text(line, px, 520, &fonts::FreeSansBold12pt7b, isnan(cur) ? MUTED : strength_color(cur));
+        text(line, px, 520 + pb, &fonts::FreeSansBold12pt7b, isnan(cur) ? MUTED : strength_color(cur));
     }
 
-    Rect reset{px, H - 90, 240, 60};
+    Rect reset{P ? W - 264 : px, H - 90, 240, 60};
     button(reset, "Start over");
     if (tapped(reset)) {
         for (int i = 0; i < kBins; ++i) { s_bin[i] = -127; s_bin_set[i] = false; }
@@ -912,9 +984,9 @@ void screen_rename() {
     bool sticks = s_target_view.kind == Kind::AirPods || s_target_view.stable_addr || s_target_view.away;
     snprintf(sub, sizeof sub, "%s%s", s_target_view.label,
              sticks ? "" : "   -   this device changes its address every few minutes, so the name only lasts until then");
-    text(sub, 24, 70, &fonts::FreeSans9pt7b, sticks ? MUTED : WARN);
+    text_wrap(sub, 24, 66, W - 48, &fonts::FreeSans9pt7b, sticks ? MUTED : WARN, 22);
 
-    Rect field{24, 108, W - 48, 84};
+    Rect field{24, P ? 150 : 108, W - 48, 84};
     canvas.fillRoundRect(field.x, field.y, field.w, field.h, 14, PANEL);
     canvas.drawRoundRect(field.x, field.y, field.w, field.h, 14, ACCENT);
     text(s_edit[0] ? s_edit : "Type a name", field.x + 28, field.y + 42, &fonts::FreeSansBold18pt7b,
@@ -924,9 +996,12 @@ void screen_rename() {
         canvas.fillRect(cxp, field.y + 20, 3, 44, ACCENT);
     }
 
-    const int kw = 112, kh = 84, pitch = 120, rowp = 92, x0 = (W - 1200) / 2, y0 = 214;
+    // Ten keys across, sized to the screen width.
+    const int pitch = P ? 68 : 120, kw = pitch - 8, kh = 84, rowp = 92, x0 = (W - 10 * pitch + 8) / 2,
+              y0 = field.y + 106;
+    auto u = [&](int v) { return v * pitch / 120; };
     static const char *kRows[] = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
-    static const int kIndent[] = {0, 0, 60, 120};
+    const int kIndent[] = {0, 0, pitch / 2, pitch};
     size_t len = strlen(s_edit);
     for (int row = 0; row < 4; ++row) {
         for (int i = 0; kRows[row][i]; ++i) {
@@ -942,15 +1017,15 @@ void screen_rename() {
             }
         }
     }
-    Rect shift{x0, y0 + 3 * rowp, kw, kh}, del{x0 + 120 + 7 * pitch, y0 + 3 * rowp, 232, kh};
+    Rect shift{x0, y0 + 3 * rowp, kw, kh}, del{x0 + 8 * pitch, y0 + 3 * rowp, 2 * pitch - 8, kh};
     button(shift, "Aa", s_shift);
     button(del, "Delete");
     if (tapped(shift)) { s_shift = !s_shift; s_tap = false; }
     if (tapped(del)) { if (len) s_edit[--len] = 0; s_shift = len == 0; s_tap = false; }
 
     int yb = y0 + 4 * rowp;
-    Rect cancel{x0, yb, 220, kh}, space{x0 + 240, yb, 520, kh}, clear{x0 + 780, yb, 180, kh},
-         save{x0 + 980, yb, 220, kh};
+    Rect cancel{x0, yb, u(220), kh}, space{x0 + u(240), yb, u(520), kh}, clear{x0 + u(780), yb, u(180), kh},
+         save{x0 + u(980), yb, u(220), kh};
     button(cancel, "Cancel");
     button(space, "Space");
     button(clear, "Clear");
@@ -976,12 +1051,12 @@ void screen_rename() {
 // ---------------------------------------------------------------- Wi-Fi channels
 void screen_channels() {
     draw_header("Signal Finder & Analyzer");
-    Rect back{24, 92, 150, 56};
+    Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
     if (tapped(back)) { s_screen = Screen::Tools; s_tap = false; }
-    text("Wi-Fi channels", 196, 100, &fonts::FreeSansBold18pt7b, TEXT);
-    text("How many networks sit on each 2.4 GHz channel. Bar colour = the strongest one there.", 196, 136,
-         &fonts::FreeSans9pt7b, MUTED);
+    text("Wi-Fi channels", 196, 100 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
+    text_wrap("How many networks sit on each 2.4 GHz channel. Bar colour = the strongest one there.", 196,
+              136 + Y0, W - 220, &fonts::FreeSans9pt7b, MUTED, 22);
 
     devices_snapshot(s_list, Filter::Wifi, 30000);
     int cnt[15] = {0};
@@ -995,7 +1070,7 @@ void screen_channels() {
         most = std::max(most, cnt[d.channel]);
     }
 
-    const int gx = 60, gy = 190, gw = W - 120, gh = H - gy - 150, n = 13, slot = gw / n;
+    const int gx = 60, gy = 190 + Y0 + (P ? 24 : 0), gw = W - 120, gh = H - gy - 150, n = 13, slot = gw / n;
     canvas.fillRoundRect(gx - 16, gy - 10, gw + 32, gh + 64, 14, PANEL);
     for (int c = 1; c <= n; ++c) {
         int x = gx + (c - 1) * slot + 10, w = slot - 20;
@@ -1031,7 +1106,8 @@ void screen_channels() {
             }
             if (score < low) { low = score; pick = c; }
         }
-        snprintf(msg, sizeof msg, "Least crowded for your own router: channel %d   (%u networks seen)", pick,
+        snprintf(msg, sizeof msg, P ? "Least crowded: channel %d   (%u networks)"
+                                   : "Least crowded for your own router: channel %d   (%u networks seen)", pick,
                  (unsigned)s_list.size());
     }
     text(msg, W / 2, H - 40, &fonts::FreeSansBold12pt7b, GOOD, middle_center);
@@ -1040,12 +1116,12 @@ void screen_channels() {
 // ---------------------------------------------------------------- More
 // One settings row: title, description, and a button on the right.
 bool tool_row(int i, const char *title, const char *desc, const char *btn, bool on, uint32_t desc_color = MUTED) {
-    const int top = 164, rh = 86;
+    const int top = 164 + Y0, rh = P ? 124 : 86;
     Rect r{24, top + i * rh, W - 48, rh - 10};
     canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
     text(title, r.x + 24, r.y + 10, &fonts::FreeSansBold12pt7b, TEXT);
-    text(desc, r.x + 24, r.y + 44, &fonts::FreeSans9pt7b, desc_color);
-    Rect b{r.x + r.w - 236, r.y + 10, 220, r.h - 20};
+    text_wrap(desc, r.x + 24, r.y + 42, r.w - 24 - 252, &fonts::FreeSans9pt7b, desc_color, 22);
+    Rect b{r.x + r.w - 236, r.y + (r.h - 56) / 2, 220, 56};
     button(b, btn, on);
     if (tapped(b)) { s_tap = false; return true; }
     return false;
@@ -1053,10 +1129,10 @@ bool tool_row(int i, const char *title, const char *desc, const char *btn, bool 
 
 void screen_tools() {
     draw_header("Signal Finder & Analyzer");
-    Rect back{24, 92, 150, 56};
+    Rect back{24, 92 + Y0, 150, 56};
     button(back, "< Back");
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
-    text("More", 196, 106, &fonts::FreeSansBold18pt7b, TEXT);
+    text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
     char d[160];
     if (tool_row(0, "Tracker alert",
@@ -1090,17 +1166,18 @@ void screen_tools() {
         else if (saved_count()) s_forget_confirm = true;
     }
 
-    if (tool_row(5, "Screen", "Flip the screen the other way up.", "Rotate", false)) {
-        s_rotation = s_rotation == 3 ? 1 : 3;
+    if (tool_row(5, "Screen", "Turns the screen a quarter turn each tap: wide, tall, wide upside-down, tall upside-down.",
+                 "Rotate", false)) {
+        s_rotation = (s_rotation + 1) % 4;
         save_settings();
-        make_canvas();
+        s_rotate_pending = true;          // applied at the start of the next frame
     }
 }
 
 // ---------------------------------------------------------------- volume drop-down
 // Opens under the Sound button. Drag the slider; it saves when you let go.
-Rect vol_button() { return Rect{W - 326, 12, 170, 52}; }
-Rect vol_panel()  { return Rect{W - 566, 82, 546, 156}; }
+Rect vol_button() { Rect a, b, c; header_buttons(a, b, c); return b; }
+Rect vol_panel()  { return P ? Rect{24, 146, W - 48, 156} : Rect{W - 566, 82, 546, 156}; }
 constexpr int kVolTrackInset = 36, kVolTrackRight = 120;
 
 void vol_input() {
@@ -1151,14 +1228,15 @@ void vol_draw() {
 // ---------------------------------------------------------------- alerts
 // The alert banner sits on top of whatever screen is showing. Its buttons are
 // handled before the screen underneath so a tap can't fall through.
-Rect alert_panel() { return Rect{40, H - 236, W - 80, 212}; }
+Rect alert_panel() { return P ? Rect{24, H - 290, W - 48, 266} : Rect{40, H - 236, W - 80, 212}; }
 
 void alert_input() {
     const Alert &a = alerts_current();
     if (!a.active) return;
     Rect p = alert_panel();
-    Rect find{p.x + p.w - 3 * 232, p.y + p.h - 78, 216, 60}, mine{p.x + p.w - 2 * 232, p.y + p.h - 78, 216, 60},
-         no{p.x + p.w - 232, p.y + p.h - 78, 216, 60};
+    const int abw = P ? 200 : 216, astep = abw + 16;
+    Rect find{p.x + p.w - 3 * astep, p.y + p.h - 78, abw, 60}, mine{p.x + p.w - 2 * astep, p.y + p.h - 78, abw, 60},
+         no{p.x + p.w - astep, p.y + p.h - 78, abw, 60};
     if (tapped(find)) {
         DeviceView d = a.dev;
         alerts_dismiss();
@@ -1180,9 +1258,10 @@ void alert_draw() {
     canvas.drawRoundRect(p.x, p.y, p.w, p.h, 18, edge);
     canvas.drawRoundRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2, 17, edge);
     text(a.title, p.x + 32, p.y + 22, &fonts::FreeSansBold18pt7b, edge);
-    text(a.line, p.x + 32, p.y + 74, &fonts::FreeSans12pt7b, TEXT);
-    Rect find{p.x + p.w - 3 * 232, p.y + p.h - 78, 216, 60}, mine{p.x + p.w - 2 * 232, p.y + p.h - 78, 216, 60},
-         no{p.x + p.w - 232, p.y + p.h - 78, 216, 60};
+    text_wrap(a.line, p.x + 32, p.y + 74, p.w - 64, &fonts::FreeSans12pt7b, TEXT, 30);
+    const int abw = P ? 200 : 216, astep = abw + 16;
+    Rect find{p.x + p.w - 3 * astep, p.y + p.h - 78, abw, 60}, mine{p.x + p.w - 2 * astep, p.y + p.h - 78, abw, 60},
+         no{p.x + p.w - astep, p.y + p.h - 78, abw, 60};
     button(find, "Find it", true);
     if (a.type == AlertType::Tracker) button(mine, "It's mine");
     button(no, "Dismiss");
@@ -1210,6 +1289,7 @@ void ui_init() {
 
 void ui_loop_once() {
     int64_t t0 = esp_timer_get_time();
+    if (s_rotate_pending) { s_rotate_pending = false; make_canvas(); }
     poll_touch();
     s_tap = s_tap_latched;
     s_tx = s_latch_x;

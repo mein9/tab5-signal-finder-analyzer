@@ -39,7 +39,8 @@ hidden access point.
   channels 1, 6 and 11.
 - **Log to SD card** â€“ writes what it hears to `FINDLOG/LOGnnnnn.CSV` every
   10 seconds.
-- Volume slider, scan on / off, screen rotation.
+- Volume slider, scan on / off, and four screen orientations (landscape and
+  portrait, each either way up).
 
 ## Limits worth knowing
 
@@ -102,7 +103,7 @@ Dependencies are fetched by the IDF component manager: `esp_hosted` 3.0.6,
 
 The Tab5's panel is natively portrait and its frame buffer is in external RAM.
 Letting the graphics library rotate each landscape frame in software took about
-650 ms. Instead, frames are drawn in landscape into one of two buffers, and a
+650 ms. Instead, frames are drawn the way you hold the Tab5 into one of two buffers, and a
 background task uses the ESP32-P4's PPA hardware to rotate the finished buffer
 into the display and clear it for reuse while the next frame is drawn. That
 gives about 17 frames a second.
