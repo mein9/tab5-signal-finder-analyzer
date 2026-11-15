@@ -12,6 +12,8 @@
 #include "nvs.h"
 #include "esp_rom_sys.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 
 #include "ble_scan.h"
 #include "wifi_scan.h"
@@ -84,6 +86,39 @@ static void record_start() {
                  hist[i].launcher_init, hist[i].boot_to_app, hist[i].boot_timer, hist[i].ddlb);
 }
 
+// 1 = treat a USB restart as a power-on, to test the hand-over from a PC.
+#define HANDOVER_TEST 0
+
+// When this app is installed under the M5Launcher, a power-on should show the
+// Launcher first. The Launcher's boot loader does that only when the chip
+// reports a plain power-on. Some Tab5 units report a watchdog reset instead
+// (the first boot attempt after power-up times out and the chip retries), so
+// the boot loader starts this app directly and the Launcher is never seen.
+//
+// So: if this start came from a power-on, and there is a Launcher to go to,
+// make the Launcher the boot target and restart into it. Choosing this app in
+// the Launcher restarts with a "software" reset code, which lands here and
+// carries on normally.
+static void hand_over_to_launcher_on_power_on() {
+    const int reason = (int)esp_rom_get_reset_reason(0);
+    const bool power_on = reason == 1 /* power-on */ || reason == 7 /* watchdog retry at power-up */ ||
+                          (HANDOVER_TEST && reason == 23 /* USB restart */);
+    if (!power_on) return;
+
+    // Only when running from a Launcher app slot, with a Launcher present.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running || running->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MIN ||
+        running->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MAX) return;
+    const esp_partition_t *launcher =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
+    esp_app_desc_t desc;
+    if (!launcher || esp_ota_get_partition_description(launcher, &desc) != ESP_OK) return;
+
+    ESP_LOGI(TAG, "power-on (reset code %d): handing over to the Launcher (%s)", reason, desc.project_name);
+    if (esp_ota_set_boot_partition(launcher) == ESP_OK) esp_restart();
+    ESP_LOGW(TAG, "couldn't select the Launcher; staying in the app");
+}
+
 extern "C" void app_main(void) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -93,6 +128,7 @@ extern "C" void app_main(void) {
     }
 
     record_start();
+    hand_over_to_launcher_on_power_on();
 
     auto cfg = M5.config();
     cfg.internal_imu = true;

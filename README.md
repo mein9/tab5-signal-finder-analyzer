@@ -126,10 +126,16 @@ python -m esptool --chip esp32p4 write_flash 0x2000 build/bootloader/bootloader.
 
 The app needs about 2.7 MB, so the Launcher app slot must be at least that big.
 
-On the Tab5 the Launcher keeps a flag that makes every other power-on skip the
-Launcher and start the installed app directly. This app clears that flag each
-time it starts, so the Launcher shows on every power-on and then follows its
-own "boot to app" setting.
+Under the Launcher, a power-on shows the Launcher first, as it should. Two
+quirks are handled for that:
+
+- Some Tab5 units report a watchdog reset instead of a plain power-on when
+  switched on, so the Launcher's boot loader starts the installed app directly.
+  When this app sees it was started that way, it makes the Launcher the boot
+  target and restarts into it. Choosing the app in the Launcher brings you
+  back.
+- The Launcher keeps a flag that makes every other start skip its own screen.
+  This app clears it.
 
 ## Build
 
