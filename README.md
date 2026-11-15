@@ -20,8 +20,8 @@ up first at every power-on.
 | Wi-Fi networks | Wi-Fi channel chart | Volume slider |
 | ![Phone bands](docs/screenshots/phone-bands.png) | ![Following one phone band](docs/screenshots/phone-finder.png) | ![More screen](docs/screenshots/more.png) |
 | Phone bands | Following one phone band | More screen |
-| ![Error report pop-up](docs/screenshots/error-report.png) | ![Pocket mode](docs/screenshots/pocket-mode.png) | |
-| Error report pop-up after a crash | Pocket mode | |
+| ![Error report pop-up](docs/screenshots/error-report.png) | ![Copy to SD window](docs/screenshots/copy-to-sd.png) | ![Pocket mode](docs/screenshots/pocket-mode.png) |
+| Error report pop-up after a crash | Copy to SD window | Pocket mode |
 
 Portrait works too:
 
@@ -87,6 +87,13 @@ address and reading in them is made up.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
 - **Power off** - switches the Tab5 off from the More screen.
+- **Copy to SD** - More > Copy to SD opens a window explaining what it does:
+  it writes the installed version onto the SD card as `signal_finder.bin`
+  (checked against what is in flash), so the card always has the version you
+  are running. If an older copy under a previous name is on the card, the
+  window offers to delete it too; that is off unless you switch it on. A PC
+  can do the same by sending `sdcopy` (or `sdclean`, to delete older copies)
+  over the USB serial port.
 - **Error reports** - if the app ever crashes, the next start offers to save a
   report to the SD card (`FINDLOG/ERRnnnnn.TXT`, plus the raw crash dump as
   `CORnnnnn.BIN`). You
@@ -217,6 +224,7 @@ gives about 17 frames a second.
 | `main/clock.cpp` | Date and time |
 | `main/sdr.cpp` | Phone-band meter (RTL-SDR) |
 | `main/errlog.cpp` | Error log and crash reports |
+| `main/selfcopy.cpp` | Copy the app to the SD card; USB commands |
 | `main/demo.cpp` | Demo mode |
 | `main/ui.cpp` | All screens |
 

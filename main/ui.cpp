@@ -25,6 +25,7 @@
 #include "saved.h"
 #include "sdlog.h"
 #include "sdr.h"
+#include "selfcopy.h"
 #include "wifi_scan.h"
 
 namespace {
@@ -77,6 +78,12 @@ bool     s_forget_confirm = false;
 bool     s_off_confirm = false;          // "Power off" tapped once
 int      s_report = 0;                   // error report pop-up: 0 none, 1 asking, 2 showing the result
 uint32_t s_report_until = 0;
+char     s_note[160] = "";               // text of the result banner (s_report == 2)
+int      s_copy = 0;                     // copy app to SD: 0 idle, 1 show "copying", 2 copy now, 4 confirm window
+bool     s_copy_delete = false;          // also delete the older copy afterwards
+bool     s_copy_has_old = false;         // an older copy is on the card
+bool     s_shot_wanted = false;          // a PC asked for a screenshot over USB
+char     s_old_names[80] = "";
 char     s_edit[24] = {0};              // nickname being typed
 bool     s_shift = true;
 uint8_t  s_rotation = 3;
@@ -161,6 +168,14 @@ void button(const Rect &r, const char *label, bool on = false) {
     canvas.drawRoundRect(r.x, r.y, r.w, r.h, 14, on ? ACCENT : LINE);
     text(label, r.x + r.w / 2, r.y + r.h / 2, &fonts::FreeSansBold12pt7b, on ? BG : TEXT,
          middle_center);
+}
+
+// A button that sits on a pop-up window. Pop-ups use the same shade as a
+// normal button, so these are drawn darker with a brighter outline.
+void popup_button(const Rect &r, const char *label, bool on = false) {
+    canvas.fillRoundRect(r.x, r.y, r.w, r.h, 14, on ? ACCENT : BG);
+    canvas.drawRoundRect(r.x, r.y, r.w, r.h, 14, on ? ACCENT : MUTED);
+    text(label, r.x + r.w / 2, r.y + r.h / 2, &fonts::FreeSansBold12pt7b, on ? BG : TEXT, middle_center);
 }
 
 uint32_t blend(uint32_t a, uint32_t b, float t) {
@@ -680,6 +695,8 @@ void screen_phone() {
 // Starts tracking a device and opens the hot/cold screen.
 void phone_list(int sx, int sy);
 void save_report();
+void show_note(const char *text);
+void open_copy_window();
 
 void open_finder(const DeviceView &d) {
     s_target_view = d;
@@ -1329,17 +1346,27 @@ void screen_tools() {
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
     if (!P) text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
+    // Title-row buttons: Copy to SD, Save report, Power off.
+    const int tbw = P ? 164 : 220, tgap = P ? 8 : 12;
+    Rect off{W - 24 - tbw, 92 + Y0, tbw, 56}, rep{off.x - tgap - tbw, 92 + Y0, tbw, 56},
+         cpy{rep.x - tgap - tbw, 92 + Y0, tbw, 56};
+
+    // Put the installed version on the SD card, ready to reinstall from the Launcher.
+    button(cpy, "Copy to SD");
+    if (tapped(cpy)) {
+        open_copy_window();
+        s_tap = false;
+    }
+
     // Save an error report to the SD card, for sending to the developer.
-    Rect rep{W - 264 - 232, 92 + Y0, 220, 56};
     button(rep, "Save report");
     if (tapped(rep)) {
         save_report();
         s_tap = false;
     }
 
-    // Power off, top right. Two taps, so a stray touch can't switch the Tab5 off.
-    Rect off{W - 264, 92 + Y0, 240, 56};
-    button(off, s_off_confirm ? "Tap to confirm" : "Power off", s_off_confirm);
+    // Power off. Two taps, so a stray touch can't switch the Tab5 off.
+    button(off, s_off_confirm ? "Confirm" : "Power off", s_off_confirm);
     if (tapped(off)) {
         s_tap = false;
         if (!s_off_confirm) {
@@ -1616,6 +1643,7 @@ void save_report() {
              (int)M5.Power.getBatteryLevel(), !tg.active ? "nothing" : tg.wifi_channel ? "a Wi-Fi network" : "a Bluetooth device",
              sdlog_status(), (unsigned)saved_count(), (unsigned)alerts_history_count());
     if (errlog_save(st)) errlog_dismiss();
+    snprintf(s_note, sizeof s_note, "%s", errlog_message());
     s_report = 2;
     s_report_until = now_ms() + 6000;
 }
@@ -1645,7 +1673,7 @@ void report_draw() {
     canvas.drawRoundRect(p.x, p.y, p.w, p.h, 18, ACCENT);
     canvas.drawRoundRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2, 17, ACCENT);
     if (s_report == 2) {
-        text_wrap(errlog_message(), p.x + 32, p.y + 26, p.w - 64, &fonts::FreeSansBold12pt7b, TEXT, 32);
+        text_wrap(s_note, p.x + 32, p.y + 26, p.w - 64, &fonts::FreeSansBold12pt7b, TEXT, 32);
         return;
     }
     text_wrap(errlog_crash_text(), p.x + 32, p.y + 20, p.w - 64, &fonts::FreeSansBold18pt7b, WARN, 40);
@@ -1654,8 +1682,100 @@ void report_draw() {
               p.x + 32, p.y + (P ? 106 : 68), p.w - 64, &fonts::FreeSans12pt7b, TEXT, 30);
     const int bw2 = P ? 300 : 260;
     Rect save{p.x + p.w - 2 * (bw2 + 16), p.y + p.h - 78, bw2, 60}, no{p.x + p.w - (bw2 + 16), p.y + p.h - 78, bw2, 60};
-    button(save, "Save report", true);
-    button(no, "Not now");
+    popup_button(save, "Save report", true);
+    popup_button(no, "Not now");
+}
+
+// ---------------------------------------------------------------- copy app to SD
+// Shows a banner with `text` for a few seconds.
+void show_note(const char *text) {
+    snprintf(s_note, sizeof s_note, "%s", text);
+    s_report = 2;
+    s_report_until = now_ms() + 7000;
+}
+
+// Opens the confirm window: what the copy is for, and whether to delete an
+// older copy as well.
+void open_copy_window() {
+    s_copy_delete = false;
+    s_copy_has_old = app_old_copies(s_old_names, sizeof s_old_names) > 0;
+    s_copy = 4;
+}
+
+// Runs the copy. It takes several seconds, so a "copying" frame is drawn
+// first (s_copy 1 -> 2), then the work happens between frames.
+void copy_step() {
+    if (s_copy == 1) { s_copy = 2; return; }
+    if (s_copy != 2) return;
+    char msg[160];
+    bool ok = app_copy_to_sd(msg, sizeof msg);
+    if (ok && s_copy_delete) {
+        size_t n = app_remove_old_copies();
+        size_t len = strlen(msg);
+        snprintf(msg + len, sizeof msg - len, n ? ". Old copy deleted." : ". The old copy couldn't be deleted.");
+    }
+    s_copy = 0;
+    s_copy_delete = false;
+    show_note(msg);
+}
+
+Rect copy_panel() {
+    const int h = P ? 470 : 330;
+    return P ? Rect{24, (H - h) / 2, W - 48, h} : Rect{120, (H - h) / 2 + 20, W - 240, h};
+}
+
+// The three controls in the confirm window.
+void copy_rects(const Rect &p, Rect &opt, Rect &go, Rect &cancel) {
+    const int bw2 = P ? 300 : 260;
+    go = Rect{p.x + p.w - 2 * (bw2 + 16), p.y + p.h - 80, bw2, 60};
+    cancel = Rect{p.x + p.w - (bw2 + 16), p.y + p.h - 80, bw2, 60};
+    opt = Rect{p.x + 32, p.y + p.h - 164, P ? p.w - 64 : 520, 60};
+}
+
+void copy_input() {
+    if (s_copy != 4) return;
+    Rect p = copy_panel(), opt, go, cancel;
+    copy_rects(p, opt, go, cancel);
+    if (s_copy_has_old && tapped(opt)) s_copy_delete = !s_copy_delete;
+    else if (tapped(go)) s_copy = 1;
+    else if (tapped(cancel)) s_copy = 0;
+    s_tap = false;                          // the window is modal: nothing behind it reacts
+}
+
+void copy_draw() {
+    if (s_copy == 0) return;
+    if (s_copy != 4) {                      // copying: a slim banner at the bottom
+        Rect b = P ? Rect{24, H - 134, W - 48, 110} : Rect{40, H - 134, W - 80, 110};
+        canvas.fillRoundRect(b.x, b.y, b.w, b.h, 18, PANEL_HI);
+        canvas.drawRoundRect(b.x, b.y, b.w, b.h, 18, ACCENT);
+        text_wrap("Copying the app to the SD card. This takes a little while...", b.x + 32, b.y + 26, b.w - 64,
+                  &fonts::FreeSansBold12pt7b, TEXT, 32);
+        return;
+    }
+    Rect p = copy_panel(), opt, go, cancel;
+    copy_rects(p, opt, go, cancel);
+    canvas.fillRoundRect(p.x, p.y, p.w, p.h, 18, PANEL_HI);
+    canvas.drawRoundRect(p.x, p.y, p.w, p.h, 18, ACCENT);
+    canvas.drawRoundRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2, 17, ACCENT);
+    text("Update the app file on the SD card", p.x + 32, p.y + 22, P ? &fonts::FreeSansBold12pt7b : &fonts::FreeSansBold18pt7b,
+         TEXT);
+    char body[260];
+    snprintf(body, sizeof body,
+             "This puts the version you are running now onto the SD card as signal_finder.bin, replacing "
+             "the one there. It keeps the card up to date, so the Launcher can reinstall the current "
+             "version later.");
+    int y = text_wrap(body, p.x + 32, p.y + (P ? 62 : 74), p.w - 64, &fonts::FreeSans12pt7b, TEXT, 30);
+    if (s_copy_has_old) {
+        char old[160];
+        snprintf(old, sizeof old, "An older copy is also on the card: %s", s_old_names);
+        text_wrap(old, p.x + 32, y + 6, p.w - 64, &fonts::FreeSans9pt7b, MUTED, 22);
+        popup_button(opt, s_copy_delete ? "Delete the old copy too: Yes" : "Delete the old copy too: No", s_copy_delete);
+    } else {
+        text_wrap("No older copy of the app was found on the card.", p.x + 32, y + 6, p.w - 64, &fonts::FreeSans9pt7b,
+                  MUTED, 22);
+    }
+    popup_button(go, "Copy to SD", true);
+    popup_button(cancel, "Cancel");
 }
 
 // ---------------------------------------------------------------- alerts
@@ -1695,9 +1815,9 @@ void alert_draw() {
     const int abw = P ? 200 : 216, astep = abw + 16;
     Rect find{p.x + p.w - 3 * astep, p.y + p.h - 78, abw, 60}, mine{p.x + p.w - 2 * astep, p.y + p.h - 78, abw, 60},
          no{p.x + p.w - astep, p.y + p.h - 78, abw, 60};
-    button(find, "Find it", true);
-    if (a.type == AlertType::Tracker) button(mine, "It's mine");
-    button(no, "Dismiss");
+    popup_button(find, "Find it", true);
+    if (a.type == AlertType::Tracker) popup_button(mine, "It's mine");
+    popup_button(no, "Dismiss");
 }
 
 // Alarm sound: two-tone for trackers and left-behind (20 s), a short chirp for new devices.
@@ -1750,11 +1870,33 @@ void ui_loop_once() {
     sdr_set_wanted(s_scan_on && ((s_screen == Screen::List && s_phone_section) || s_screen == Screen::Phone));
     sdr_set_focus(s_screen == Screen::Phone ? s_phone_band : -1);
     if (sdr_wants_power_cycle()) sdr_power_cycle();     // I2C belongs to this task
+    int ux = 0, uy = 0;
+    switch (usb_command_take(&ux, &uy)) {               // requests from a PC over USB
+    case UsbCommand::Tap:
+        s_tap = true;
+        s_tx = ux;
+        s_ty = uy;
+        s_last_touch = now_ms();
+        break;
+    case UsbCommand::Screenshot:
+        s_shot_wanted = true;
+        break;
+    case UsbCommand::CopyAppToSd:
+        if (s_copy == 0) s_copy = 1;
+        break;
+    case UsbCommand::RemoveOldCopies: {
+        size_t n = app_remove_old_copies();
+        s_copy = 0;
+        show_note(n ? "Older copy deleted from the SD card" : "No older copy on the SD card");
+        break;
+    }
+    default: break;
+    }
 
     alerts_tick();
     sdlog_tick();
     if (locked) s_vol_open = false;
-    else { report_input(); alert_input(); vol_input(); }
+    else { copy_input(); report_input(); alert_input(); vol_input(); }
 
     int64_t t1 = esp_timer_get_time();
     begin_frame();
@@ -1772,7 +1914,7 @@ void ui_loop_once() {
     case Screen::Phone:    screen_phone();    break;
     }
     vol_draw();
-    if (!locked) { alert_draw(); report_draw(); }
+    if (!locked) { alert_draw(); report_draw(); copy_draw(); }
     alert_sound();
 
     // Screen brightness: full in use, dimmed when left alone (battery saver),
@@ -1789,7 +1931,21 @@ void ui_loop_once() {
     }
     int64_t t2 = esp_timer_get_time();
     poll_touch();
+    if (s_shot_wanted) {    // half-size screenshot of the frame just drawn, as RGB565 hex rows
+        s_shot_wanted = false;
+        const uint16_t *px = (const uint16_t *)canvas.getBuffer();
+        static char row[4 * 640 + 2];
+        printf("\nSHOT screen %d %d\n", W / 2, H / 2);
+        for (int y = 0; y + 2 <= H; y += 2) {
+            int n = 0;
+            for (int x = 0; x + 2 <= W; x += 2) n += sprintf(row + n, "%04x", px[y * W + x]);
+            row[n] = 0;
+            puts(row);
+        }
+        printf("ENDSHOT\n");
+    }
     push_frame();
+    copy_step();            // after the "copying" banner is on screen
     int64_t t3 = esp_timer_get_time();
     static int64_t a_in = 0, a_draw = 0, a_push = 0, last = 0; static int frames = 0;
     a_in += t1 - t0; a_draw += t2 - t1; a_push += t3 - t2; ++frames;
