@@ -25,3 +25,6 @@ const char *errlog_message();
 
 // Forget the crash (after saving, or when the user says "not now").
 void errlog_dismiss();
+
+// Demo mode only: pretend the last run crashed, so the pop-up can be shown.
+void errlog_demo_crash();

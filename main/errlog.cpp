@@ -239,3 +239,9 @@ bool errlog_save(const char *status) {
     ESP_LOGI("finder_err", "%s%s%s", s_message, core_path[0] ? " + " : "", core_path[0] ? core_path + 4 : "");
     return true;
 }
+
+void errlog_demo_crash() {
+#if FINDER_DEMO
+    snprintf(s_crash_text, sizeof s_crash_text, "The app stopped unexpectedly last time");
+#endif
+}

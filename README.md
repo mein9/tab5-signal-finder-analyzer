@@ -20,6 +20,8 @@ up first at every power-on.
 | Wi-Fi networks | Wi-Fi channel chart | Volume slider |
 | ![Phone bands](docs/screenshots/phone-bands.png) | ![Following one phone band](docs/screenshots/phone-finder.png) | ![More screen](docs/screenshots/more.png) |
 | Phone bands | Following one phone band | More screen |
+| ![Error report pop-up](docs/screenshots/error-report.png) | ![Pocket mode](docs/screenshots/pocket-mode.png) | |
+| Error report pop-up after a crash | Pocket mode | |
 
 Portrait works too:
 
