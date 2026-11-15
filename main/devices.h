@@ -34,6 +34,7 @@ struct DeviceView {
     Kind     kind;
     uint32_t sig;           // non-zero: devices that rotate address share this
     float    rssi;          // smoothed, dBm
+    float    rank;          // steadier strength the list is ordered by
     int8_t   peak;
     uint32_t age_ms;        // since last heard
     uint32_t count;

@@ -55,7 +55,14 @@ Filter   s_filter = Filter::Findable;
 bool     s_wifi_section = false;
 bool     s_phone_section = false;        // list shows phone bands (RTL-SDR)
 int      s_phone_band = 0;               // band open on the phone finder screen
-int      s_page = 0;
+float    s_scroll = 0;                   // list scroll position, pixels
+float    s_scroll_vel = 0;               // pixels per frame it keeps gliding after a flick
+float    s_scroll_at_press = 0;
+bool     s_list_press = false;           // the finger went down on the list
+bool     s_list_dragged = false;         // ...and has moved far enough to count as a scroll
+int      s_list_last_y = 0;
+bool     s_release = false;              // the finger was lifted this frame
+bool     s_click_now = false;            // this frame's tap came from a PC: press and release at once
 uint8_t  s_volume = 55;                 // percent, 0 = off
 bool     s_vol_open = false;            // volume drop-down showing
 bool     s_vol_dirty = false;           // slider moved, not saved yet
@@ -411,10 +418,12 @@ void push_frame() {
 
 // Touch is checked more than once a frame so a quick tap is never missed.
 bool s_tap_latched = false;
+bool s_release_latched = false;
 int  s_latch_x = 0, s_latch_y = 0;
 void poll_touch() {
     M5.update();
     auto td = M5.Touch.getDetail();
+    if (s_down && !td.isPressed()) s_release_latched = true;
     if (td.wasPressed()) {
         s_tap_latched = true;
         s_latch_x = td.x;
@@ -724,9 +733,9 @@ void screen_list() {
     button(bt, "Bluetooth", !s_wifi_section && !s_phone_section);
     button(wf, "Wi-Fi", s_wifi_section);
     button(ph, "Phone", s_phone_section);
-    if (tapped(bt)) { s_wifi_section = false; s_phone_section = false; s_page = 0; s_tap = false; }
-    if (tapped(wf)) { s_wifi_section = true; s_phone_section = false; s_page = 0; s_tap = false; }
-    if (tapped(ph)) { s_wifi_section = false; s_phone_section = true; s_page = 0; s_tap = false; }
+    if (tapped(bt)) { s_wifi_section = false; s_phone_section = false; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
+    if (tapped(wf)) { s_wifi_section = true; s_phone_section = false; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
+    if (tapped(ph)) { s_wifi_section = false; s_phone_section = true; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
     if (!P) canvas.drawFastVLine(628, 96, 48, LINE);
     const int fx = P ? 24 : 644, fy = P ? 184 + Y0 : 120;     // where the per-section status line goes
 
@@ -738,7 +747,7 @@ void screen_list() {
         for (int i = 0; i < 3; ++i) {
             Rect r = P ? Rect{24 + i * 228, 156 + Y0, 216, 56} : Rect{644 + i * 208, 92, 196, 56};
             button(r, names[i], s_filter == vals[i]);
-            if (tapped(r)) { s_filter = vals[i]; s_page = 0; s_tap = false; }
+            if (tapped(r)) { s_filter = vals[i]; s_scroll = 0; s_scroll_vel = 0; s_tap = false; }
         }
     } else {
         char ws[96];
@@ -761,10 +770,45 @@ void screen_list() {
         return sv && (sv->flags & kSavedPin);
     });
 
-    const int top = 164 + Y0 + (P ? 64 : 0), row_h = 80, foot = 80;
-    const int rows = std::max(1, (H - top - foot) / row_h);
-    const int pages = std::max(1, (int)((s_list.size() + rows - 1) / rows));
-    s_page = std::min(s_page, pages - 1);
+    // The rows scroll under the finger. A row opens when the finger is lifted
+    // without having dragged; a drag moves the list, and a flick keeps it gliding.
+    const int top = 164 + Y0 + (P ? 64 : 0), row_h = 80, foot = 56;
+    const int view_h = H - top - foot;
+    const Rect view{0, top, W, view_h};
+    const float max_scroll = std::max(0, (int)s_list.size() * row_h - view_h);
+
+    bool click = false;
+    int cx = 0, cy = 0;
+    if (s_tap && view.hit(s_tx, s_ty)) {
+        if (s_click_now) { click = true; cx = s_tx; cy = s_ty; }
+        else {
+            s_list_press = true;
+            s_list_dragged = false;
+            s_scroll_at_press = s_scroll;
+            s_list_last_y = s_ty;
+            s_scroll_vel = 0;
+        }
+        s_tap = false;
+    } else if (s_tap) {
+        s_list_press = false;
+    }
+    if (s_list_press && s_down) {
+        if (abs(s_cur_y - s_latch_y) > 14) s_list_dragged = true;
+        if (s_list_dragged) {
+            s_scroll = s_scroll_at_press - (s_cur_y - s_latch_y);
+            s_scroll_vel = 0.5f * s_scroll_vel + 0.5f * (s_list_last_y - s_cur_y);
+        }
+        s_list_last_y = s_cur_y;
+    } else if (s_list_press) {              // lifted
+        if (!s_list_dragged && s_release) { click = true; cx = s_cur_x; cy = s_cur_y; }
+        if (!s_list_dragged) s_scroll_vel = 0;
+        s_list_press = false;
+    } else if (fabsf(s_scroll_vel) > 1) {   // gliding after a flick
+        s_scroll += s_scroll_vel;
+        s_scroll_vel *= 0.86f;
+    }
+    if (s_scroll < 0 || s_scroll > max_scroll) s_scroll_vel = 0;
+    s_scroll = std::min(std::max(s_scroll, 0.0f), max_scroll);
 
     if (s_list.empty()) {
         const char *msg;
@@ -778,28 +822,34 @@ void screen_list() {
         text_wrap(msg, 48, top + 100, W - 96, &fonts::FreeSans12pt7b, MUTED, 34);
     }
 
-    for (int i = 0; i < rows; ++i) {
-        size_t idx = (size_t)(s_page * rows + i);
-        if (idx >= s_list.size()) break;
+    const int scroll = (int)s_scroll;
+    bool opened = false;
+    for (size_t idx = scroll / row_h; idx < s_list.size(); ++idx) {
         const DeviceView &d = s_list[idx];
-        Rect r{24, top + i * row_h, W - 48, row_h - 8};
+        Rect r{24, top + (int)idx * row_h - scroll, W - 56, row_h - 8};
+        if (r.y >= top + view_h) break;
+        canvas.setClipRect(0, top, W, view_h);                      // rows stay inside the list area
         canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
         signal_bars(r.x + 20, r.y + 16, d.rssi);
         Saved *sv = saved_find(d);
         const char *label = sv && sv->name[0] ? sv->name : d.label;
-        canvas.setClipRect(r.x + 100, r.y, r.w - 100 - 150, r.h);   // keep long text off the reading
-        text(label, r.x + 100, r.y + 10, &fonts::FreeSansBold12pt7b, TEXT);
-        int tagx = r.x + 100 + canvas.textWidth(label, &fonts::FreeSansBold12pt7b) + 18;
-        if (sv && (sv->flags & kSavedPin)) {
-            text("PINNED", tagx, r.y + 16, &fonts::FreeSans9pt7b, ACCENT);
-            tagx += 92;
+        // keep long text off the reading, and inside the list area
+        const int ty0 = std::max(r.y, top), ty1 = std::min(r.y + r.h, top + view_h);
+        if (ty1 > ty0) {
+            canvas.setClipRect(r.x + 100, ty0, r.w - 100 - 150, ty1 - ty0);
+            text(label, r.x + 100, r.y + 10, &fonts::FreeSansBold12pt7b, TEXT);
+            int tagx = r.x + 100 + canvas.textWidth(label, &fonts::FreeSansBold12pt7b) + 18;
+            if (sv && (sv->flags & kSavedPin)) {
+                text("PINNED", tagx, r.y + 16, &fonts::FreeSans9pt7b, ACCENT);
+                tagx += 92;
+            }
+            if (sv && (sv->flags & kSavedWatch)) text("ALARM SET", tagx, r.y + 16, &fonts::FreeSans9pt7b, WARN);
+            char det[160];
+            if (sv && sv->name[0]) snprintf(det, sizeof det, "%s  |  %s", d.label, d.detail);
+            else snprintf(det, sizeof det, "%s", d.detail);
+            text(det, r.x + 100, r.y + 42, &fonts::FreeSans9pt7b, MUTED);
+            canvas.setClipRect(0, top, W, view_h);
         }
-        if (sv && (sv->flags & kSavedWatch)) text("ALARM SET", tagx, r.y + 16, &fonts::FreeSans9pt7b, WARN);
-        char det[160];
-        if (sv && sv->name[0]) snprintf(det, sizeof det, "%s  |  %s", d.label, d.detail);
-        else snprintf(det, sizeof det, "%s", d.detail);
-        text(det, r.x + 100, r.y + 42, &fonts::FreeSans9pt7b, MUTED);
-        canvas.clearClipRect();
         char rs[32];
         snprintf(rs, sizeof rs, "%.0f dBm", d.rssi);
         text(rs, r.x + r.w - 24, r.y + 12, &fonts::FreeSansBold12pt7b, strength_color(d.rssi),
@@ -809,19 +859,26 @@ void screen_list() {
         else snprintf(ago, sizeof ago, "%lus ago", (unsigned long)(d.age_ms / 1000));
         text(ago, r.x + r.w - 24, r.y + 44, &fonts::FreeSans9pt7b, MUTED, top_right);
 
-        if (tapped(r)) {
+        if (click && view.hit(cx, cy) && r.hit(cx, cy)) {
+            canvas.clearClipRect();
             open_finder(d);
-            s_tap = false;
+            opened = true;
             break;      // the list is no longer on screen
         }
     }
+    canvas.clearClipRect();
+    if (opened) return;
 
-    Rect prev{24, H - 70, 200, 56}, next{W - 224, H - 70, 200, 56};
+    if (max_scroll > 0) {                   // scroll bar at the right edge
+        const int bh = std::max(40, (int)((float)view_h * view_h / (s_list.size() * row_h)));
+        const int by = top + (int)((view_h - bh) * (s_scroll / max_scroll));
+        canvas.fillRoundRect(W - 22, top, 8, view_h - 8, 4, PANEL);
+        canvas.fillRoundRect(W - 22, by, 8, bh - 8, 4, MUTED);
+    }
     char pg[96];
-    snprintf(pg, sizeof pg, P ? "Page %d of %d" : "Page %d of %d  |  tap a device to find it", s_page + 1, pages);
-    text(pg, W / 2, H - 42, &fonts::FreeSans12pt7b, MUTED, middle_center);
-    if (s_page > 0) { button(prev, "< Prev"); if (tapped(prev)) { --s_page; s_tap = false; } }
-    if (s_page < pages - 1) { button(next, "Next >"); if (tapped(next)) { ++s_page; s_tap = false; } }
+    snprintf(pg, sizeof pg, max_scroll > 0 ? "%d found  |  drag to scroll, tap one to find it"
+                                            : "%d found  |  tap one to find it", (int)s_list.size());
+    text(pg, W / 2, H - 30, &fonts::FreeSans12pt7b, MUTED, middle_center);
 }
 
 // ---------------------------------------------------------------- shared finder bits
@@ -1855,6 +1912,9 @@ void ui_loop_once() {
     s_tx = s_latch_x;
     s_ty = s_latch_y;
     s_tap_latched = false;
+    s_release = s_release_latched;
+    s_release_latched = false;
+    s_click_now = false;
     bool locked = s_screen == Screen::Locked;
     // The tap that wakes a dimmed screen does nothing else; pocket mode ignores taps.
     if (s_dimmed || locked) s_tap = false;
@@ -1874,6 +1934,7 @@ void ui_loop_once() {
     switch (usb_command_take(&ux, &uy)) {               // requests from a PC over USB
     case UsbCommand::Tap:
         s_tap = true;
+        s_click_now = true;
         s_tx = ux;
         s_ty = uy;
         s_last_touch = now_ms();

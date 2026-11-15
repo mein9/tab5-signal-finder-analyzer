@@ -1,6 +1,7 @@
 #include "devices.h"
 
 #include <string.h>
+#include <math.h>
 #include <stdio.h>
 #include <algorithm>
 
@@ -27,12 +28,15 @@ struct Device {
     uint8_t  channel;      // Wi-Fi
     uint8_t  auth;         // Wi-Fi, wifi_auth_mode_t
     float    ema;
+    float    rank;         // strength used for list order; 0 = not set yet
     int8_t   peak;
     uint32_t first_ms;
     uint32_t last_ms;
     uint32_t count;
     uint32_t motion0;      // s_motion_s when first heard
 };
+
+constexpr float   kRankStep = 6.0f;   // dB a signal must change before its row moves
 
 Device            s_dev[kMaxDevices];
 Sample            s_samples[kMaxSamples];
@@ -378,9 +382,14 @@ void devices_snapshot(std::vector<DeviceView> &out, Filter filter, uint32_t max_
     uint32_t t = now_ms();
     {
         Lock lock;
-        for (const auto &d : s_dev) {
+        for (auto &d : s_dev) {
             if (!d.used || t - d.last_ms > max_age_ms || !passes(d, filter)) continue;
+            // The list is ordered by a strength that only follows the real one
+            // once it has moved by more than kRankStep, so rows don't keep
+            // swapping places over normal signal flutter.
+            if (d.rank == 0 || fabsf(d.ema - d.rank) > kRankStep) d.rank = d.ema;
             DeviceView v{};
+            v.rank = d.rank;
             memcpy(v.addr, d.addr, 6);
             v.addr_type = d.addr_type;
             v.kind = d.kind;
@@ -401,7 +410,10 @@ void devices_snapshot(std::vector<DeviceView> &out, Filter filter, uint32_t max_
         }
     }
     std::sort(out.begin(), out.end(),
-              [](const DeviceView &a, const DeviceView &b) { return a.rssi > b.rssi; });
+              [](const DeviceView &a, const DeviceView &b) {
+                  if (a.rank != b.rank) return a.rank > b.rank;
+                  return memcmp(a.addr, b.addr, 6) < 0;
+              });
 }
 
 uint32_t devices_age_of(const uint8_t addr[6], uint8_t addr_type, uint32_t sig, bool by_sig) {
