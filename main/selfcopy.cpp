@@ -52,6 +52,9 @@ void command_task(void *) {
                 ESP_LOGI(TAG, "USB command: delete older copies from the SD card");
             } else if (strcmp(line, "shot") == 0) {
                 s_command = UsbCommand::Screenshot;
+            } else if (strncmp(line, "flick ", 6) == 0) {
+                s_arg_x = atoi(line + 6);
+                s_command = UsbCommand::Flick;
             } else if (strncmp(line, "tap ", 4) == 0) {
                 int x = 0, y = 0;
                 if (sscanf(line + 4, "%d %d", &x, &y) == 2) {

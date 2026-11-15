@@ -24,9 +24,10 @@ size_t app_remove_old_copies();
 //   sdcopy     copy the app to the SD card
 //   sdclean    delete older copies of the app from the SD card
 //   tap X Y    act as if the screen was tapped at X, Y
+//   flick N    set the device list gliding, N pixels a second (negative: back up)
 //   shot       send a half-size screenshot (rows of RGB565 hex between
 //              "SHOT name w h" and "ENDSHOT")
 // Requests are picked up by the UI task through usb_command_take().
 void usb_commands_start();
-enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Screenshot };
+enum class UsbCommand { None, CopyAppToSd, RemoveOldCopies, Tap, Flick, Screenshot };
 UsbCommand usb_command_take(int *x, int *y);

@@ -56,7 +56,8 @@ bool     s_wifi_section = false;
 bool     s_phone_section = false;        // list shows phone bands (RTL-SDR)
 int      s_phone_band = 0;               // band open on the phone finder screen
 float    s_scroll = 0;                   // list scroll position, pixels
-float    s_scroll_vel = 0;               // pixels per frame it keeps gliding after a flick
+float    s_scroll_vel = 0;               // pixels per second it keeps gliding after a flick
+int64_t  s_scroll_us = 0;                // when the list last moved, for frame-rate independent motion
 float    s_scroll_at_press = 0;
 bool     s_list_press = false;           // the finger went down on the list
 bool     s_list_dragged = false;         // ...and has moved far enough to count as a scroll
@@ -271,17 +272,45 @@ void *s_buf[2] = {nullptr, nullptr};
 uint8_t s_cur = 0;
 
 // A finished frame on its way to the screen.
-struct Frame { uint8_t idx, rot; uint16_t w, h; };
+struct Frame {
+    uint8_t  idx, rot;
+    uint16_t w, h;
+    uint16_t band_y, band_h;    // band to paint in the buffer once it is cleared
+    uint16_t part_y, part_h;    // only these rows changed since the last frame (part_h 0: all of it)
+};
+
+// Filling big areas from the CPU is slow (the frame buffers live in PSRAM), so
+// the list's row background is painted by the display hardware when a buffer
+// is cleared: a band of PANEL colour across the list area. Each buffer
+// remembers the band it was given; a screen that wants something else fixes
+// the difference itself (see prepare_band).
+uint16_t s_band_y[2] = {0, 0}, s_band_h[2] = {0, 0};
+uint16_t s_want_y = 0, s_want_h = 0;     // band the next cleared buffer should get
+uint16_t s_part_y = 0, s_part_h = 0;     // rows of this frame to send to the screen (0: all)
+int      s_plain_frames = 0;             // frames in a row that showed just the list, nothing on top
+bool     s_list_moving = false;          // the list is being dragged or is gliding
+int      s_band_reset = 0;               // frames left to clear in software (after a rotation)
 QueueHandle_t s_q_present = nullptr, s_q_free = nullptr;
 
-bool hw_rotate(void *src, int w, int h, uint8_t rot) {
+// Copies a frame to the screen, turned to match the display rotation. With
+// ph > 0 only rows py .. py+ph are copied: moving that much memory is what
+// limits the frame rate, so a scrolling list sends just its own area.
+bool hw_rotate(void *src, int w, int h, uint8_t rot, int py = 0, int ph = 0) {
     ppa_srm_oper_config_t op;
     memset(&op, 0, sizeof op);
     op.in.buffer = src;
     op.in.pic_w = w;
     op.in.pic_h = h;
+    if (ph <= 0 || ph > h) { py = 0; ph = h; }
     op.in.block_w = w;
-    op.in.block_h = h;
+    op.in.block_h = ph;
+    op.in.block_offset_y = py;
+    switch (rot & 3) {      // where those rows land on the panel
+    case 0:  op.out.block_offset_y = py; break;
+    case 1:  op.out.block_offset_x = s_panel_w - py - ph; break;
+    case 2:  op.out.block_offset_y = s_panel_h - py - ph; break;
+    default: op.out.block_offset_x = py; break;
+    }
     op.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
     op.out.buffer = s_fb;
     op.out.buffer_size = (uint32_t)s_panel_w * s_panel_h * 2;
@@ -301,17 +330,18 @@ bool hw_rotate(void *src, int w, int h, uint8_t rot) {
     return err == ESP_OK;
 }
 
-bool hw_clear(void *dst) {
+bool hw_fill(void *dst, int w, int h, int y, int bh, uint32_t color) {
     ppa_fill_oper_config_t op;
     memset(&op, 0, sizeof op);
     op.out.buffer = dst;
-    op.out.buffer_size = (uint32_t)W * H * 2;
-    op.out.pic_w = W;
-    op.out.pic_h = H;
+    op.out.buffer_size = (uint32_t)w * h * 2;
+    op.out.pic_w = w;
+    op.out.pic_h = h;
+    op.out.block_offset_y = y;
     op.out.fill_cm = PPA_FILL_COLOR_MODE_RGB565;
-    op.fill_block_w = W;
-    op.fill_block_h = H;
-    op.fill_argb_color.val = 0xFF000000u | BG;
+    op.fill_block_w = w;
+    op.fill_block_h = bh;
+    op.fill_argb_color.val = 0xFF000000u | color;
     op.mode = PPA_TRANS_MODE_BLOCKING;
     esp_err_t err = ppa_do_fill(s_ppa_fill, &op);
     if (err != ESP_OK) ESP_LOGE("finder_ui", "PPA clear failed: %s", esp_err_to_name(err));
@@ -322,8 +352,12 @@ void presenter_task(void *) {
     Frame f;
     for (;;) {
         xQueueReceive(s_q_present, &f, portMAX_DELAY);
-        hw_rotate(s_buf[f.idx], f.w, f.h, f.rot);
-        if (!hw_clear(s_buf[f.idx])) memset(s_buf[f.idx], 0, (size_t)f.w * f.h * 2);
+        hw_rotate(s_buf[f.idx], f.w, f.h, f.rot, f.part_y, f.part_h);
+        bool band = false;
+        if (!hw_fill(s_buf[f.idx], f.w, f.h, 0, f.h, BG)) memset(s_buf[f.idx], 0, (size_t)f.w * f.h * 2);
+        else if (f.band_h) band = hw_fill(s_buf[f.idx], f.w, f.h, f.band_y, f.band_h, PANEL);
+        s_band_y[f.idx] = band ? f.band_y : 0;
+        s_band_h[f.idx] = band ? f.band_h : 0;
         xQueueSend(s_q_free, &f.idx, portMAX_DELAY);
     }
 }
@@ -347,7 +381,7 @@ bool check_hw_push() {
     };
     uint16_t a = at(0, 0), b = at(W - 1, 0);
     bool ok = a == 0xF800 && b == 0x07E0;
-    ok = ok && hw_clear(s_buf[0]) && hw_clear(s_buf[1]);
+    ok = ok && hw_fill(s_buf[0], W, H, 0, H, BG) && hw_fill(s_buf[1], W, H, 0, H, BG);
     ESP_LOGI("finder_ui", "hardware screen path: %s (%04x %04x, clear %04x)", ok ? "ok" : "NOT OK",
              a, b, ((uint16_t *)s_buf[0])[0]);
     return ok;
@@ -363,6 +397,7 @@ void make_canvas() {
     P = H > W;
     Y0 = P ? 72 : 0;
     s_canvas_rot = s_rotation;
+    s_band_reset = 3;                     // buffers in flight were prepared for the old shape
     if (s_hw_push) {                      // only the rotation changed; buffers stay
         canvas.setBuffer(s_buf[s_cur], W, H);
         return;
@@ -404,13 +439,31 @@ void make_canvas() {
 
 // Starts a frame: the canvas is cleared and ready to draw on.
 void begin_frame() {
-    if (!s_hw_push) canvas.fillScreen(BG);
+    if (!s_hw_push || s_band_reset > 0) {
+        canvas.fillScreen(BG);
+        s_band_h[s_cur] = 0;
+        s_want_h = 0;
+        if (s_band_reset > 0) --s_band_reset;
+    }
+}
+
+// Makes sure rows y .. y+h of this frame start out PANEL-coloured across the
+// whole width (and nothing else does), and asks for the same in later frames.
+// h = 0: no band.
+void prepare_band(int y, int h) {
+    int hy = s_band_y[s_cur], hh = s_band_h[s_cur];
+    if (hh && hy != y) { canvas.fillRect(0, hy, W, hh, BG); hh = 0; }
+    if (hh > h) canvas.fillRect(0, y + h, W, hh - h, BG);
+    else if (hh < h) canvas.fillRect(0, y + hh, W, h - hh, PANEL);
+    s_band_y[s_cur] = y;
+    s_band_h[s_cur] = h;
+    if (s_band_reset == 0) { s_want_y = y; s_want_h = h; }
 }
 
 // Shows the frame just drawn.
 void push_frame() {
     if (!s_hw_push) { canvas.pushSprite(&M5.Display, 0, 0); return; }
-    Frame f{s_cur, s_canvas_rot, (uint16_t)W, (uint16_t)H};
+    Frame f{s_cur, s_canvas_rot, (uint16_t)W, (uint16_t)H, s_want_y, s_want_h, s_part_y, s_part_h};
     xQueueSend(s_q_present, &f, portMAX_DELAY);
     xQueueReceive(s_q_free, &s_cur, portMAX_DELAY);   // the other buffer, shown and cleared
     canvas.setBuffer(s_buf[s_cur], W, H);
@@ -720,9 +773,13 @@ void open_finder(const DeviceView &d) {
     s_next_beep = 0;
 }
 
+bool list_shows_radio_panel() {
+    return ble_state() == BleState::ControllerFailed || radio_update_state() != RadioUpdate::Idle;
+}
+
 void screen_list() {
     draw_header("Signal Finder & Analyzer");
-    if (ble_state() == BleState::ControllerFailed || radio_update_state() != RadioUpdate::Idle) {
+    if (list_shows_radio_panel()) {
         radio_update_panel();
         return;
     }
@@ -792,20 +849,25 @@ void screen_list() {
     } else if (s_tap) {
         s_list_press = false;
     }
+    const int64_t now_us = esp_timer_get_time();
+    const float dt = std::min(0.2f, std::max(0.005f, (now_us - s_scroll_us) / 1e6f));
+    s_scroll_us = now_us;
     if (s_list_press && s_down) {
         if (abs(s_cur_y - s_latch_y) > 14) s_list_dragged = true;
         if (s_list_dragged) {
             s_scroll = s_scroll_at_press - (s_cur_y - s_latch_y);
-            s_scroll_vel = 0.5f * s_scroll_vel + 0.5f * (s_list_last_y - s_cur_y);
+            s_scroll_vel = 0.5f * s_scroll_vel + 0.5f * (s_list_last_y - s_cur_y) / dt;
         }
         s_list_last_y = s_cur_y;
     } else if (s_list_press) {              // lifted
         if (!s_list_dragged && s_release) { click = true; cx = s_cur_x; cy = s_cur_y; }
         if (!s_list_dragged) s_scroll_vel = 0;
         s_list_press = false;
-    } else if (fabsf(s_scroll_vel) > 1) {   // gliding after a flick
-        s_scroll += s_scroll_vel;
-        s_scroll_vel *= 0.86f;
+    } else if (fabsf(s_scroll_vel) > 20) {  // gliding after a flick
+        s_scroll += s_scroll_vel * dt;
+        s_scroll_vel *= expf(-3.0f * dt);
+    } else {
+        s_scroll_vel = 0;
     }
     if (s_scroll < 0 || s_scroll > max_scroll) s_scroll_vel = 0;
     s_scroll = std::min(std::max(s_scroll, 0.0f), max_scroll);
@@ -824,12 +886,28 @@ void screen_list() {
 
     const int scroll = (int)s_scroll;
     bool opened = false;
+    s_list_moving = (s_list_press && s_list_dragged) || s_scroll_vel != 0;
+    s_part_y = top;
+    s_part_h = view_h;
+    // Row backgrounds come ready-painted as one band; only the gaps, the side
+    // margins and the rounded corners are drawn here.
+    const int content_h = std::min(view_h, std::max(0, (int)s_list.size() * row_h - 8 - scroll));
+    prepare_band(top, content_h);
+    canvas.fillRect(0, top, 24, content_h, BG);
+    canvas.fillRect(W - 32, top, 32, content_h, BG);
     for (size_t idx = scroll / row_h; idx < s_list.size(); ++idx) {
         const DeviceView &d = s_list[idx];
         Rect r{24, top + (int)idx * row_h - scroll, W - 56, row_h - 8};
         if (r.y >= top + view_h) break;
         canvas.setClipRect(0, top, W, view_h);                      // rows stay inside the list area
-        canvas.fillRoundRect(r.x, r.y, r.w, r.h, 12, PANEL);
+        canvas.fillRect(r.x, r.y + r.h, r.w, row_h - r.h, BG);      // gap below the row
+        for (int dy = 0; dy < 12; ++dy) {                           // round the corners
+            int cut = 12 - (int)sqrtf(144.0f - (12 - dy) * (12 - dy));
+            canvas.drawFastHLine(r.x, r.y + dy, cut, BG);
+            canvas.drawFastHLine(r.x + r.w - cut, r.y + dy, cut, BG);
+            canvas.drawFastHLine(r.x, r.y + r.h - 1 - dy, cut, BG);
+            canvas.drawFastHLine(r.x + r.w - cut, r.y + r.h - 1 - dy, cut, BG);
+        }
         signal_bars(r.x + 20, r.y + 16, d.rssi);
         Saved *sv = saved_find(d);
         const char *label = sv && sv->name[0] ? sv->name : d.label;
@@ -1939,6 +2017,9 @@ void ui_loop_once() {
         s_ty = uy;
         s_last_touch = now_ms();
         break;
+    case UsbCommand::Flick:
+        s_scroll_vel = ux;
+        break;
     case UsbCommand::Screenshot:
         s_shot_wanted = true;
         break;
@@ -1961,6 +2042,9 @@ void ui_loop_once() {
 
     int64_t t1 = esp_timer_get_time();
     begin_frame();
+    s_list_moving = false;
+    // Only the device list uses the ready-painted band; anything else starts plain.
+    if (!(s_screen == Screen::List && !s_phone_section && !list_shows_radio_panel())) prepare_band(0, 0);
     switch (s_screen) {
     case Screen::List:   screen_list();   break;
     case Screen::Finder: screen_finder(); break;
@@ -1973,6 +2057,16 @@ void ui_loop_once() {
     case Screen::History:  screen_history();  break;
     case Screen::Locked:   screen_locked();   break;
     case Screen::Phone:    screen_phone();    break;
+    }
+    // While the list moves and nothing else is showing, only the list area goes
+    // to the screen. That needs the frame before to have been a plain list too.
+    {
+        bool plain = s_list_moving && s_screen == Screen::List && !s_vol_open && !alerts_current().active &&
+                     s_report == 0 && s_copy == 0 && s_band_reset == 0 && !s_shot_wanted;
+        if (!(plain && s_plain_frames >= 2)) s_part_h = 0;
+        bool list_only = s_screen == Screen::List && !s_vol_open && !alerts_current().active && s_report == 0 &&
+                         s_copy == 0 && s_band_reset == 0;
+        s_plain_frames = list_only ? s_plain_frames + 1 : 0;
     }
     vol_draw();
     if (!locked) { alert_draw(); report_draw(); copy_draw(); }
@@ -2010,11 +2104,13 @@ void ui_loop_once() {
     int64_t t3 = esp_timer_get_time();
     static int64_t a_in = 0, a_draw = 0, a_push = 0, last = 0; static int frames = 0;
     a_in += t1 - t0; a_draw += t2 - t1; a_push += t3 - t2; ++frames;
+    static int64_t worst = 0;
+    worst = std::max(worst, t3 - t0);
     if (t3 - last > 3000000) {
-        ESP_LOGI("finder_ui", "%d frames in 3 s: input %lld ms, draw %lld ms, hand-off %lld ms per frame; moving %.0f s (activity %.2f)",
-                 frames, a_in / frames / 1000, a_draw / frames / 1000, a_push / frames / 1000,
+        ESP_LOGI("finder_ui", "%d frames in 3 s: input %lld ms, draw %lld ms, hand-off %lld ms per frame, longest %lld ms; moving %.0f s (activity %.2f)",
+                 frames, a_in / frames / 1000, a_draw / frames / 1000, a_push / frames / 1000, worst / 1000,
                  s_motion_s, s_activity);
-        a_in = a_draw = a_push = 0; frames = 0; last = t3;
+        a_in = a_draw = a_push = 0; frames = 0; last = t3; worst = 0;
     }
     if (s_dimmed || locked) {
         // Nothing much to show: redraw about five times a second to save power,
