@@ -35,6 +35,11 @@ struct SdrBand {
 // Powers the USB-A port. Call once from the main task before other tasks use I2C.
 void sdr_power_on();
 
+// The radio task can't use I2C itself, so when a dongle seems stuck it asks
+// the UI task to switch the USB port off and on again.
+bool sdr_wants_power_cycle();
+void sdr_power_cycle();
+
 // Starts the background task. It stays idle until sdr_set_wanted(true).
 void sdr_start();
 void sdr_set_wanted(bool wanted);

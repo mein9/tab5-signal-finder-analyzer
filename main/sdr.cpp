@@ -56,6 +56,7 @@ struct BandLive {
 volatile SdrState s_state = SdrState::Off;
 volatile bool     s_wanted = false;
 volatile int      s_focus = -1;
+volatile bool     s_cycle_wanted = false;     // ask the UI task to power-cycle the USB port
 char              s_status[112] = "Phone bands are off";
 char              s_dongle[64] = "";
 BandLive          s_live[kNumBands];
@@ -213,6 +214,7 @@ void sdr_task(void *) {
     ESP_LOGI(TAG, "driver %s ready", esp_rtl_sdr_get_version_string());
     esp_log_level_set("esp_rtl_sdr", ESP_LOG_WARN);     // it logs every device-list poll otherwise
 
+    int misses = 0, cycles = 0;
     for (;;) {
         if (!s_wanted) {
             if (esp_rtl_sdr_get_state(s_sdr) == ESP_RTL_SDR_STATE_STREAMING) esp_rtl_sdr_stop(s_sdr, 1000);
@@ -230,9 +232,17 @@ void sdr_task(void *) {
                 set_status(on_bus ? "A USB device is connected, but it isn't a supported RTL-SDR"
                                   : "Plug an RTL-SDR into the Tab5's USB-A port");
                 { Lock lock; s_dongle[0] = 0; }
+                // Nothing on the bus for a while: try switching the port off and
+                // on (twice at most, so an empty port doesn't keep interrupting).
+                if (!on_bus && ++misses % 12 == 0 && cycles < 2) {
+                    ++cycles;
+                    s_cycle_wanted = true;
+                }
                 vTaskDelay(pdMS_TO_TICKS(700));
                 continue;
             }
+            misses = 0;
+            cycles = 0;
             s_state = SdrState::Starting;
             set_status("Starting the receiver...");
             esp_rtl_sdr_device_info_t info = {};
@@ -346,16 +356,36 @@ void sdr_task(void *) {
 
 } // namespace
 
-void sdr_power_on() {
-    // USB5V_EN is pin 3 of the second I/O expander (PI4IOE5V6408 at 0x44).
-    // Only that bit is touched: the same chip also powers the Wi-Fi/Bluetooth radio.
+// USB5V_EN is pin 3 of the second I/O expander (PI4IOE5V6408 at 0x44). Only
+// that bit is touched: the same chip also powers the Wi-Fi/Bluetooth radio.
+static void usb_power(bool on) {
     constexpr uint8_t kAddr = 0x44, kBit = 1 << 3;
     constexpr uint32_t kHz = 400000;
-    M5.In_I2C.bitOn(kAddr, 0x05, kBit, kHz);    // output level high
+    if (on) M5.In_I2C.bitOn(kAddr, 0x05, kBit, kHz);
+    else M5.In_I2C.bitOff(kAddr, 0x05, kBit, kHz);
     M5.In_I2C.bitOff(kAddr, 0x07, kBit, kHz);   // not high-impedance
     M5.In_I2C.bitOn(kAddr, 0x03, kBit, kHz);    // direction: output
-    bool on = M5.In_I2C.readRegister8(kAddr, 0x05, kHz) & kBit;
+}
+
+void sdr_power_on() {
+    // The port stays powered across a restart of the Tab5's main chip, which
+    // can leave a dongle stuck mid-stream and invisible. Switching the port
+    // off briefly makes the dongle start fresh.
+    usb_power(false);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    usb_power(true);
+    bool on = M5.In_I2C.readRegister8(0x44, 0x05, 400000) & (1 << 3);
     ESP_LOGI(TAG, "USB-A power %s", on ? "on" : "FAILED");
+}
+
+bool sdr_wants_power_cycle() { return s_cycle_wanted; }
+
+void sdr_power_cycle() {
+    usb_power(false);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    usb_power(true);
+    s_cycle_wanted = false;
+    ESP_LOGI(TAG, "USB-A power cycled");
 }
 
 void sdr_start() {

@@ -1674,6 +1674,7 @@ void ui_loop_once() {
     // The RTL-SDR only runs while the Phone section or a phone band is on screen.
     sdr_set_wanted(s_scan_on && ((s_screen == Screen::List && s_phone_section) || s_screen == Screen::Phone));
     sdr_set_focus(s_screen == Screen::Phone ? s_phone_band : -1);
+    if (sdr_wants_power_cycle()) sdr_power_cycle();     // I2C belongs to this task
 
     alerts_tick();
     sdlog_tick();
