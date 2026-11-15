@@ -124,7 +124,12 @@ Take `signal_finder.bin` from the releases page (or build it), then either:
 python -m esptool --chip esp32p4 write_flash 0x2000 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/signal_finder.bin
 ```
 
-The app needs about 2.5 MB, so the Launcher app slot must be at least that big.
+The app needs about 2.7 MB, so the Launcher app slot must be at least that big.
+
+On the Tab5 the Launcher keeps a flag that makes every other power-on skip the
+Launcher and start the installed app directly. This app clears that flag each
+time it starts, so the Launcher shows on every power-on and then follows its
+own "boot to app" setting.
 
 ## Build
 

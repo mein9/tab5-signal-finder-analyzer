@@ -5,9 +5,13 @@
 // the motion sensor to show which direction the signal is strongest.
 
 #include <M5Unified.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_rom_sys.h"
+#include "esp_system.h"
 
 #include "ble_scan.h"
 #include "wifi_scan.h"
@@ -31,6 +35,55 @@ static void log_task(void *) {
     }
 }
 
+// Keeps a short record of how the app was started each time (the chip's reset
+// code, and the Launcher's own boot flags at that moment). It is printed on
+// the USB serial port, to help work out why a power-on did or didn't go
+// through the Launcher.
+struct StartRecord { uint8_t rom_reason, idf_reason, launcher_init, boot_to_app, boot_timer, ddlb; };
+
+static void record_start() {
+    constexpr size_t kKeep = 12;
+    StartRecord hist[kKeep] = {};
+    size_t n = 0;
+    nvs_handle_t h;
+    if (nvs_open("blefind", NVS_READWRITE, &h) != ESP_OK) return;
+    size_t len = sizeof hist;
+    if (nvs_get_blob(h, "starts", hist, &len) == ESP_OK) n = len / sizeof(StartRecord);
+
+    StartRecord r = {};
+    r.rom_reason = (uint8_t)esp_rom_get_reset_reason(0);
+    r.idf_reason = (uint8_t)esp_reset_reason();
+    r.launcher_init = r.boot_to_app = r.boot_timer = r.ddlb = 0xFF;      // 0xFF = not stored
+    nvs_handle_t l;
+    if (nvs_open("launcher", NVS_READONLY, &l) == ESP_OK) {
+        nvs_get_u8(l, "init", &r.launcher_init);
+        nvs_get_u8(l, "bootToApp", &r.boot_to_app);
+        nvs_get_u8(l, "bootTimer", &r.boot_timer);
+        nvs_get_u8(l, "DDLB", &r.ddlb);
+        nvs_close(l);
+    }
+    // The M5Launcher flips its "init" flag every time it starts, and when it
+    // finds the flag set it skips its own screen and restarts straight into
+    // the installed app. Left alone, that makes every other power-on bypass
+    // the Launcher. Clearing the flag here means the Launcher always shows
+    // (and then follows its own "boot to app" setting).
+    if (r.launcher_init == 1 && nvs_open("launcher", NVS_READWRITE, &l) == ESP_OK) {
+        nvs_set_u8(l, "init", 0);
+        nvs_commit(l);
+        nvs_close(l);
+    }
+    if (n == kKeep) { memmove(hist, hist + 1, (kKeep - 1) * sizeof(StartRecord)); --n; }
+    hist[n++] = r;
+    nvs_set_blob(h, "starts", hist, n * sizeof(StartRecord));
+    nvs_commit(h);
+    nvs_close(h);
+
+    for (size_t i = 0; i < n; ++i)
+        ESP_LOGI(TAG, "start %u%s: chip reset code %u, idf reason %u, launcher init=%u bootToApp=%u bootTimer=%u DDLB=%u",
+                 (unsigned)(i + 1), i + 1 == n ? " (this one)" : "", hist[i].rom_reason, hist[i].idf_reason,
+                 hist[i].launcher_init, hist[i].boot_to_app, hist[i].boot_timer, hist[i].ddlb);
+}
+
 extern "C" void app_main(void) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -38,6 +91,8 @@ extern "C" void app_main(void) {
         // other apps. Bluetooth works without it.
         ESP_LOGW(TAG, "NVS unavailable (%s), continuing without it", esp_err_to_name(err));
     }
+
+    record_start();
 
     auto cfg = M5.config();
     cfg.internal_imu = true;
