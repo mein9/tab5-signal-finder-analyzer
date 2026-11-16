@@ -1666,10 +1666,10 @@ void screen_tools() {
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
     if (!P) text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
-    // Title-row buttons: Launcher, Copy to SD, Save report, Power off.
+    // Title-row buttons: Copy to SD, Save report, Launcher, Power off.
     const int tbw = P ? (lnch ? 136 : 164) : 220, tgap = P ? (lnch ? 6 : 8) : 12;
-    Rect off{W - 24 - tbw, 92 + Y0, tbw, 56}, rep{off.x - tgap - tbw, 92 + Y0, tbw, 56},
-         cpy{rep.x - tgap - tbw, 92 + Y0, tbw, 56}, lch{cpy.x - tgap - tbw, 92 + Y0, tbw, 56};
+    Rect off{W - 24 - tbw, 92 + Y0, tbw, 56}, lch{off.x - tgap - tbw, 92 + Y0, tbw, 56},
+         rep{(lnch ? lch.x : off.x) - tgap - tbw, 92 + Y0, tbw, 56}, cpy{rep.x - tgap - tbw, 92 + Y0, tbw, 56};
 
     // Leave the app and go to the Launcher. Two taps, like Power off.
     if (lnch) {
