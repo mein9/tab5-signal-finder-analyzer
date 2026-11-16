@@ -16,6 +16,8 @@
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 #include <string.h>
 #include "nvs.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 
 #include "alerts.h"
 #include "ble_scan.h"
@@ -90,6 +92,7 @@ DeviceView s_target_view{};             // the device being tracked, as tapped
 float    s_motion_s = 0;                // seconds the Tab5 has been moving
 float    s_activity = 0;
 bool     s_forget_confirm = false;
+bool     s_launcher_confirm = false;     // "Launcher" tapped once
 bool     s_off_confirm = false;          // "Power off" tapped once
 int      s_report = 0;                   // error report pop-up: 0 none, 1 asking, 2 showing the result
 uint32_t s_report_until = 0;
@@ -631,7 +634,7 @@ void draw_header(const char *title) {
     if (tapped(vol)) { s_vol_open = !s_vol_open; s_tap = false; }
     if (tapped(more)) {
         if (s_screen == Screen::Tools) s_screen = s_tools_back;
-        else { s_tools_back = s_screen; s_screen = Screen::Tools; s_forget_confirm = false; s_off_confirm = false; }
+        else { s_tools_back = s_screen; s_screen = Screen::Tools; s_forget_confirm = false; s_off_confirm = false; s_launcher_confirm = false; }
         s_tap = false;
     }
 }
@@ -1631,18 +1634,54 @@ bool tool_row(int i, const char *title, const char *desc, const char *btn, bool 
     return false;
 }
 
+// The M5Launcher is the "factory" app; this app sits in an OTA slot next to it.
+bool launcher_installed() {
+    static int have = -1;
+    if (have < 0)
+        have = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr) &&
+               esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+    return have == 1;
+}
+
+// Leaves this app and starts the Launcher: with the boot selection cleared,
+// the bootloader starts the factory app. The Launcher sets the selection
+// again when an app is started from its list.
+void go_to_launcher() {
+    const esp_partition_t *ota =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+    if (!ota) return;
+    sdlog_stop();                           // finish the log file cleanly
+    save_settings();
+    if (esp_partition_erase_range(ota, 0, ota->size) != ESP_OK) return;
+    M5.Display.setBrightness(0);
+    esp_restart();
+}
+
 void screen_tools() {
     draw_header("Signal Finder & Analyzer");
-    Rect back{24, 92 + Y0, 150, 56};
+    const bool lnch = launcher_installed();
+    Rect back{24, 92 + Y0, (P && lnch) ? 100 : 150, 56};
     button(back, "< Back");
     hot(back, K_ESC);
     if (tapped(back)) { s_screen = s_tools_back; s_tap = false; }
     if (!P) text("More", 196, 106 + Y0, &fonts::FreeSansBold18pt7b, TEXT);
 
-    // Title-row buttons: Copy to SD, Save report, Power off.
-    const int tbw = P ? 164 : 220, tgap = P ? 8 : 12;
+    // Title-row buttons: Launcher, Copy to SD, Save report, Power off.
+    const int tbw = P ? (lnch ? 136 : 164) : 220, tgap = P ? (lnch ? 6 : 8) : 12;
     Rect off{W - 24 - tbw, 92 + Y0, tbw, 56}, rep{off.x - tgap - tbw, 92 + Y0, tbw, 56},
-         cpy{rep.x - tgap - tbw, 92 + Y0, tbw, 56};
+         cpy{rep.x - tgap - tbw, 92 + Y0, tbw, 56}, lch{cpy.x - tgap - tbw, 92 + Y0, tbw, 56};
+
+    // Leave the app and go to the Launcher. Two taps, like Power off.
+    if (lnch) {
+        button(lch, s_launcher_confirm ? "Confirm" : "Launcher", s_launcher_confirm);
+        if (tapped(lch)) {
+            s_tap = false;
+            if (!s_launcher_confirm) s_launcher_confirm = true;
+            else { go_to_launcher(); s_launcher_confirm = false; }
+        } else if (s_tap) {
+            s_launcher_confirm = false;     // any other tap cancels
+        }
+    }
 
     // Put the installed version on the SD card, ready to reinstall from the Launcher.
     button(cpy, "Copy to SD");

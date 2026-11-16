@@ -87,6 +87,8 @@ address and reading in them is made up.
 - Volume slider, scan on / off, and four screen orientations (landscape and
   portrait, each either way up).
 - **Power off** - switches the Tab5 off from the More screen.
+- **Launcher** - More > Launcher leaves the app and starts the M5Launcher
+  (tap twice to confirm). Shown when the app was installed with the Launcher.
 - **Copy to SD** - More > Copy to SD opens a window explaining what it does:
   it writes the installed version onto the SD card as `signal_finder.bin`
   (checked against what is in flash), so the card always has the version you

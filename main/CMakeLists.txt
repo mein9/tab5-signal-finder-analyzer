@@ -16,8 +16,8 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES     ${finder_sdr_requires} esp_driver_ppa esp_driver_gpio esp_driver_spi esp_driver_sdspi fatfs sdmmc
                  esp_hosted esp_wifi_remote esp_wifi esp_netif esp_event nvs_flash bt esp_timer app_update esp_partition espcoredump esp_app_format bootloader_support esp_driver_usb_serial_jtag
-    # ESP-Hosted 3.0.6 co-processor firmware with Wi-Fi + Bluetooth for the C6
-    # (Espressif's bleprph_wifi_coex/cp example, Apache-2.0). Installed on
+    # ESP-Hosted 2.12.13 co-processor firmware with Wi-Fi + Bluetooth for the C6
+    # (Espressif's slave example, Apache-2.0). Installed on
     # request from the app.
     EMBED_FILES  "c6_radio_fw.bin"
 )
